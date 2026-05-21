@@ -1,0 +1,25 @@
+# ==============================================================================
+# Nexus Core Framework Backend Dependencies
+# Install using: pip install -r requirements.txt
+# ==============================================================================
+
+# Core API Web Framework
+fastapi==0.136.1
+uvicorn==0.46.0
+python-dotenv==1.2.2
+
+# LLM Inference & Agent Orchestration (Groq Qwen-32B)
+groq==0.37.1
+langchain==1.2.15
+langchain-core==1.3.2
+langchain-groq==1.1.2
+langchain-community==0.4.1
+
+# Long-term Relational Chat Memory (PostgreSQL)
+SQLAlchemy==2.0.49
+asyncpg==0.31.0
+greenlet==3.5.0
+
+# Long-term Vector Memory (Pinecone + Google Embeddings)
+pinecone==9.0.0
+google-genai==2.4.0
