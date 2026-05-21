@@ -1,41 +1,36 @@
 import os
+import logging
+import ssl
 from sqlalchemy.ext.asyncio import create_async_engine
 from langchain_community.chat_message_histories import SQLChatMessageHistory
+from core.config import settings
 
-# Database URL from environment variable
-DB_URL = os.getenv("DATABASE_URL", "").strip()
+logger = logging.getLogger(__name__)
 
-if not DB_URL:
-    print("[Database] WARNING: DATABASE_URL not found in environment. Falling back to localhost.")
-    _pass = "password"
-    DB_URL = f"postgresql+asyncpg://postgres:{_pass}@localhost:5432/chat_bot"
+# Configure SSL for asyncpg based on reference
+connect_args = {
+    "server_settings": {"jit": "off"},  # Disable JIT for short queries
+    "command_timeout": 60,
+}
 
-# Handle Render's PostgreSQL URL format (needs asyncpg driver)
-# Render URLs often start with postgres:// or postgresql://
-if DB_URL.startswith("postgres://") and "+asyncpg" not in DB_URL:
-    DB_URL = DB_URL.replace("postgres://", "postgresql+asyncpg://", 1)
-elif DB_URL.startswith("postgresql://") and "+asyncpg" not in DB_URL:
-    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-# Ensure the +asyncpg driver is present if not already for any postgresql:// URL
-if "postgresql://" in DB_URL and "+asyncpg" not in DB_URL:
-    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-
-# Handle SSL for Aiven or other cloud providers if sslmode is in URL
-connect_args = {}
-if "sslmode=" in DB_URL:
-    connect_args["ssl"] = "require"
-
-# Debug: Print connection attempt (WITHOUT password)
-connection_info = DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL
-print(f"[Database] Attempting connection to: {connection_info}")
+if settings.DATABASE_SSL and settings.DATABASE_SSL != "disable":
+    if settings.DATABASE_SSL == "require":
+        # For development, we'll disable SSL verification (as per reference)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        connect_args["ssl"] = ssl_context
 
 # Async SQLAlchemy engine
 async_engine = create_async_engine(
-    DB_URL, 
-    pool_pre_ping=True, 
+    settings.DATABASE_URL,
     echo=False,
-    connect_args=connect_args
+    pool_pre_ping=True,
+    pool_size=5,  # 5 per worker × 2 workers = 10 total (optimized for Aiven free tier)
+    max_overflow=5,  # Allow burst to 10 per worker max
+    pool_recycle=1800,  # Recycle every 30 min (Aiven kills idle at 5min)
+    pool_timeout=30,  # Wait max 30s for a connection
+    connect_args=connect_args,
 )
 
 

@@ -25,6 +25,7 @@ from models.schemas import ChatRequest
 from memory.hierarchical_history import HierarchicalSQLChatMessageHistory
 from memory.vector_service import VectorMemoryService
 from memory.facts_extractor import FactsExtractor
+from core.config import settings
 
 # Dynamically import all tools from your tools directory package
 from tools import (
@@ -330,7 +331,7 @@ async def chat_endpoint(request: ChatRequest):
             
             llm = ChatGroq(
                 model="qwen/qwen3-32b",
-                api_key=os.getenv("API_KEY"),
+                api_key=settings.API_KEY,
                 temperature=0.3,
                 max_tokens=1024  # Limit response size to prevent exceeding TPM on Groq
             )

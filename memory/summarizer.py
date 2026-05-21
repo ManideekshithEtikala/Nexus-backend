@@ -2,7 +2,7 @@
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import BaseMessage
-import os
+from core.config import settings
 
 
 class ConversationSummarizer:
@@ -11,7 +11,7 @@ class ConversationSummarizer:
     def __init__(self):
         self.llm = ChatGroq(
             model="qwen/qwen3-32b",
-            api_key=os.getenv("API_KEY"),
+            api_key=settings.API_KEY,
             temperature=0,
             max_tokens=512,  # Prevent token limit exhaustion on Groq
         )
