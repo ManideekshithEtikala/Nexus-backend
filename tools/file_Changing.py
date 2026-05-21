@@ -72,7 +72,20 @@ def list_files(directory: str, pattern: str = "*") -> list[str]:
     path = Path(directory)
     if not path.exists():
         return [f"[Error: directory not found: {directory}]"]
-    matches = [str(p) for p in path.rglob(pattern) if p.is_file()]
+    
+    matches = []
+    ignore_dirs = {"node_modules", "venv", ".venv", ".git", "__pycache__", ".next", "dist", "build"}
+    
+    for p in path.rglob(pattern):
+        # Ignore dependency folders and common build environments
+        if any(segment in ignore_dirs for segment in p.parts):
+            continue
+        if p.is_file():
+            matches.append(str(p))
+            
+    if len(matches) > 300:
+        return sorted(matches[:300]) + [f"... and {len(matches) - 300} more files (truncated to avoid token context limits)"]
+        
     return sorted(matches)
 
 
