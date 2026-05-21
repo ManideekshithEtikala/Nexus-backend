@@ -3,16 +3,29 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 # Database URL from environment variable
-# For local development: DATABASE_URL="postgresql+asyncpg://postgres:password@localhost:5432/chat_bot"
-# For Render deployment: Automatically provided by Render in the environment
-DB_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:password@localhost:5432/chat_bot"
-).strip()
+DB_URL = os.getenv("DATABASE_URL", "").strip()
+
+if not DB_URL:
+    print("[Database] WARNING: DATABASE_URL not found in environment. Falling back to localhost.")
+    _pass = "password"
+    DB_URL = f"postgresql+asyncpg://postgres:{_pass}@localhost:5432/chat_bot"
 
 # Handle Render's PostgreSQL URL format (needs asyncpg driver)
-if DB_URL.startswith("postgresql://"):
+# Render URLs often start with postgres:// or postgresql://
+if DB_URL.startswith("postgres://") and "+asyncpg" not in DB_URL:
+    DB_URL = DB_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DB_URL.startswith("postgresql://") and "+asyncpg" not in DB_URL:
     DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# Ensure the +asyncpg driver is present if not already for any postgresql:// URL
+if "postgresql://" in DB_URL and "+asyncpg" not in DB_URL:
+    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+if "postgresql://" in DB_URL and "+asyncpg" not in DB_URL:
+    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# Debug: Print connection attempt (WITHOUT password)
+connection_info = DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL
+print(f"[Database] Attempting connection to: {connection_info}")
 
 # Async SQLAlchemy engine
 async_engine = create_async_engine(DB_URL, pool_pre_ping=True, echo=False)
