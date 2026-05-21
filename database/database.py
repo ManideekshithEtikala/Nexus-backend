@@ -20,15 +20,23 @@ elif DB_URL.startswith("postgresql://") and "+asyncpg" not in DB_URL:
 # Ensure the +asyncpg driver is present if not already for any postgresql:// URL
 if "postgresql://" in DB_URL and "+asyncpg" not in DB_URL:
     DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
-if "postgresql://" in DB_URL and "+asyncpg" not in DB_URL:
-    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
+
+# Handle SSL for Aiven or other cloud providers if sslmode is in URL
+connect_args = {}
+if "sslmode=" in DB_URL:
+    connect_args["ssl"] = "require"
 
 # Debug: Print connection attempt (WITHOUT password)
 connection_info = DB_URL.split("@")[-1] if "@" in DB_URL else DB_URL
 print(f"[Database] Attempting connection to: {connection_info}")
 
 # Async SQLAlchemy engine
-async_engine = create_async_engine(DB_URL, pool_pre_ping=True, echo=False)
+async_engine = create_async_engine(
+    DB_URL, 
+    pool_pre_ping=True, 
+    echo=False,
+    connect_args=connect_args
+)
 
 
 async def initialize_database_schemas():
