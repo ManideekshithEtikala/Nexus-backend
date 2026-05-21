@@ -1,12 +1,18 @@
 import os
-from urllib.parse import quote_plus
 from sqlalchemy.ext.asyncio import create_async_engine
 from langchain_community.chat_message_histories import SQLChatMessageHistory
 
-# Load DB_URL from environment or fallback to default local postgres setup
-_password = quote_plus("Manideekshith@11")
-DEFAULT_DB_URL = f"postgresql+asyncpg://postgres:{_password}@localhost:5432/chat_bot"
-DB_URL = os.getenv("DATABASE_URL", DEFAULT_DB_URL).strip()
+# Database URL from environment variable
+# For local development: DATABASE_URL="postgresql+asyncpg://postgres:password@localhost:5432/chat_bot"
+# For Render deployment: Automatically provided by Render in the environment
+DB_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:password@localhost:5432/chat_bot"
+).strip()
+
+# Handle Render's PostgreSQL URL format (needs asyncpg driver)
+if DB_URL.startswith("postgresql://"):
+    DB_URL = DB_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 # Async SQLAlchemy engine
 async_engine = create_async_engine(DB_URL, pool_pre_ping=True, echo=False)

@@ -1,7 +1,10 @@
+# Load environment variables FIRST, before importing anything else
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import json
 import asyncio
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -57,8 +60,6 @@ from tools import (
     get_env_variable,
     check_disk_usage,
 )
-
-load_dotenv()
 
 app = FastAPI(title="Nexus Core Framework API", version="1.0.0")
 
