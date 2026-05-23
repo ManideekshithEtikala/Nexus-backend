@@ -4,7 +4,6 @@ import json
 # pyrefly: ignore [missing-import]
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
-from core.config import settings
 
 
 class FactsExtractor:
@@ -16,7 +15,7 @@ class FactsExtractor:
     def __init__(self):
         self.llm = ChatGroq(
             model="qwen/qwen3-32b",
-            api_key=settings.API_KEY,
+            api_key=os.getenv("API_KEY"),
             temperature=0,
             max_tokens=1024  # Provide enough token budget for reasoning + JSON array
         )

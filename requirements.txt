@@ -24,3 +24,11 @@ greenlet==3.5.0
 # Long-term Vector Memory (Pinecone + Google Embeddings)
 pinecone==9.0.0
 google-genai==2.4.0
+
+# Relational Graph Memory
+networkx>=3.0
+
+# Speech & Voice Integration (Phase 5)
+edge-tts>=6.1.1
+python-multipart>=0.0.9
+

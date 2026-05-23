@@ -205,13 +205,4 @@ class HierarchicalSQLChatMessageHistory(BaseChatMessageHistory):
         except Exception as e:
             print(f"Warning: Could not persist summary: {e}")
 
-    # Synchronous wrappers for compatibility with RunnableWithMessageHistory
-    def get_messages(self):
-        import asyncio
 
-        return asyncio.run(self.aget_messages())
-
-    def add_messages(self, messages):
-        import asyncio
-
-        return asyncio.run(self.aadd_messages(messages))

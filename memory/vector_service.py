@@ -6,7 +6,6 @@ from typing import Optional, List
 from pinecone import Pinecone
 from google import genai
 from google.genai import types
-from core.config import settings
 
 
 class VectorMemoryService:
@@ -16,14 +15,18 @@ class VectorMemoryService:
     """
 
     def __init__(self):
-        self.api_key = settings.PINECONE_API_KEY
-        self.index_name = settings.PINECONE_INDEX_NAME
-        self.provider = settings.EMBEDDING_PROVIDER
+        self.api_key = os.getenv("PINECONE_API_KEY", "").strip()
+        self.index_name = os.getenv("PINECONE_INDEX_NAME", "nexus-memory-cloud").strip()
+        self.provider = os.getenv("EMBEDDING_PROVIDER", "google").strip().lower()
         
         # Load embedding model & default to 'models/gemini-embedding-2' which is verified as active in this API environment
-        self.model_name = settings.EMBEDDING_MODEL
+        model_env = os.getenv("EMBEDDING_MODEL", "").strip()
+        if not model_env:
+            self.model_name = "models/gemini-embedding-2"
+        else:
+            self.model_name = model_env
             
-        self.google_api_key = settings.GEMINI_API_KEY
+        self.google_api_key = os.getenv("GEMINI_API_KEY", "").strip()
 
         self.pc = None
         self.index = None

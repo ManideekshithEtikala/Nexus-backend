@@ -17,8 +17,15 @@ from .codebase import (
 from .environment_issues import get_environment_info, get_env_variable, check_disk_usage
 from .git import git_status, git_diff, git_log, git_commit
 from .websearch import fetch_url, search_pypi
+from .browser import browse_web, capture_local_ui
 from .terminal import run_command, run_python_code, get_running_processes, kill_process
 from .error_handling import resilient_tool
+from .subagent_tools import (
+    delegate_to_coder,
+    delegate_to_shell,
+    delegate_to_git,
+    delegate_to_researcher,
+)
 
 __all__ = [
     "read_file",
@@ -41,9 +48,15 @@ __all__ = [
     "git_commit",
     "fetch_url",
     "search_pypi",
+    "browse_web",
+    "capture_local_ui",
     "run_command",
     "run_python_code",
     "get_running_processes",
     "kill_process",
     "append_to_file",
+    "delegate_to_coder",
+    "delegate_to_shell",
+    "delegate_to_git",
+    "delegate_to_researcher",
 ]

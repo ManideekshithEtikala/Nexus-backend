@@ -1,10 +1,7 @@
-# Load environment variables FIRST, before importing anything else
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 import json
 import asyncio
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -25,7 +22,6 @@ from models.schemas import ChatRequest
 from memory.hierarchical_history import HierarchicalSQLChatMessageHistory
 from memory.vector_service import VectorMemoryService
 from memory.facts_extractor import FactsExtractor
-from core.config import settings
 
 # Dynamically import all tools from your tools directory package
 from tools import (
@@ -61,6 +57,8 @@ from tools import (
     get_env_variable,
     check_disk_usage,
 )
+
+load_dotenv()
 
 app = FastAPI(title="Nexus Core Framework API", version="1.0.0")
 
@@ -331,7 +329,7 @@ async def chat_endpoint(request: ChatRequest):
             
             llm = ChatGroq(
                 model="qwen/qwen3-32b",
-                api_key=settings.API_KEY,
+                api_key=os.getenv("API_KEY"),
                 temperature=0.3,
                 max_tokens=1024  # Limit response size to prevent exceeding TPM on Groq
             )
@@ -546,5 +544,4 @@ async def health():
 
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
