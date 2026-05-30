@@ -17,7 +17,7 @@ from .database import get_db, engine, Base
 from .models import ChatSession, Message
 
 # Specialized Agent Tools
-from .tools import research_docs_tool
+from .tools import research_docs_tool, web_search_tool
 from langchain.agents import create_agent
 
 load_dotenv()
@@ -37,12 +37,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@tool
-async def hi_tool() -> str:
-    """Call this tool when the user greets you with words like hi, hello, or hey."""
-    return "Hello! How can I assist with you today?"
 
-tools = [hi_tool, research_docs_tool]
+tools = [research_docs_tool, web_search_tool]
 llm = ChatGroq(
     model="llama-3.3-70b-versatile",
     temperature=0.1,
@@ -131,14 +127,21 @@ async def build_optimized_context(db: AsyncSession, session_id: str, current_sum
         if msg.role == "user":
             history_stack.append(HumanMessage(content=msg.content))
         elif msg.role == "assistant":
-            history_stack.append(AIMessage(content=msg.content, tool_calls=msg.tool_calls or []))
+            # Safely pass existing tool calls tracking data back to the model state
+            history_stack.append(AIMessage(content=msg.content or "", tool_calls=msg.tool_calls or []))
         elif msg.role == "tool":
-            history_stack.append(ToolMessage(content=msg.content, tool_call_id=msg.content))
+            # 💡 THE FIX: Extract a valid, clean tracking ID instead of filling it with long search results content
+            t_id = "legacy_tool_call_id"
+            if msg.tool_calls and len(msg.tool_calls) > 0:
+                t_id = msg.tool_calls[0].get("id", t_id)
+            elif isinstance(msg.tool_calls, dict):
+                 t_id = msg.tool_calls.get("id", t_id)
+            history_stack.append(ToolMessage(content=msg.content, tool_call_id=t_id))
 
     return history_stack, db_messages
 
 
-async def compress_old_history_background(db: AsyncSession, chat_session: ChatSession, db_messages: list):
+async def compress_old_history_background(chat_session: ChatSession, db_messages: list):
     """Summarizes older conversation turns that slid past the current active window constraint."""
     WINDOW_SIZE = 6
     if len(db_messages) <= WINDOW_SIZE:
@@ -176,7 +179,9 @@ async def compress_old_history_background(db: AsyncSession, chat_session: ChatSe
 # =====================================================================
 # 🚀 CLEAN, AGGREGATED ENDPOINT ROUTER
 # =====================================================================
-
+@app.get("/")
+async def health():
+    return {"working"}
 @app.post("/api/agent")
 async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db)):
     session_uuid = payload.sessionId
@@ -201,18 +206,25 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
     # Step 5: Isolate and persist new execution turns (assistant text responses and tool telemetry)
     new_messages = result["messages"][len(history_stack):]
     ai_response = ""
-    
+    #some tools return the object or list not only string so we need to check if the content is corrector not
     for msg in new_messages:
-        role_type = "assistant" if type(msg).__name__ == "AIMessage" else "tool"
-        content_payload = msg.content
+        role_type = "assistant" if isinstance(msg, AIMessage) else "tool"
+        
+        # 💡 THE FIX: Safely parse tool data vs string data representations
+        if hasattr(msg, "model_dump_json"):
+            content_payload = msg.model_dump_json() if role_type == "tool" else msg.content
+        else:
+            content_payload = str(msg.content)
+            
         t_calls = msg.tool_calls if hasattr(msg, 'tool_calls') else None
         
-        if role_type == "assistant" and content_payload:
-            ai_response = content_payload
+        if role_type == "assistant" and msg.content:
+            ai_response = msg.content
+            
         is_ai_msg_important = False
-        if role_type == "assistant" and content_payload:
+        if role_type == "assistant" and ai_response:
             try:
-                ai_classification = await classifier_chain.ainvoke({"content": content_payload})
+                ai_classification = await classifier_chain.ainvoke({"content": ai_response})
                 is_ai_msg_important = ai_classification.is_Important
             except Exception:
                 is_ai_msg_important = False
@@ -220,15 +232,15 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
             session_id=session_uuid, role=role_type, content=content_payload, tool_calls=t_calls,is_Important=is_ai_msg_important
         ))
 
-    if not ai_response:
+    if not ai_response and len(result["messages"]) > 0:
         ai_response = result["messages"][-1].content
 
     await db.flush() # Stage changes, preparing database row counts for the compression calculation
 
     # Step 6: Compress older historical records if the global array has overflowed our limits
-    await compress_old_history_background(db, chat_session, db_messages)
+    await compress_old_history_background(chat_session, db_messages)
 
-    await db.commit() # Atomic save of all logs and summary status data blocks to Aiven Cloud
+    await db.commit() # Atomic save of all logs and summary status data blocks to Local Sql
     return {"response": ai_response}
 
 
