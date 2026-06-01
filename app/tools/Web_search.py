@@ -5,22 +5,24 @@ from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from tavily import AsyncTavilyClient
 dotenv.load_dotenv()
-
-
-tavily_api_key = os.getenv("TAVILY_API_KEY")
-tavily_client = AsyncTavilyClient(api_key=tavily_api_key)
 #This Schema is used so when ever we give query to the agent it fills this schema with the infomraito that we had given and sends to the llm and the llm will give a professionoal response right? so this reponse is send to the pydantic model response_output function so then we get a proper json perfeclty 
 class UniversalWebSearchSchema(BaseModel):
     query: str = Field(
-        description="The target search query. Optimize this into clean keywords. Strip out fluff like 'please find' or 'search for'."
+        description=(
+            "The search query compressed into 2-4 strict keywords. "
+            "Remove all conversational phrases, questions, and temporal filler words. "
+            "Example: 'Who won the basketball game last night?' becomes 'basketball game score'."
+        )
     )
     
     topic: Literal["general", "news", "finance", "shopping"] = Field(
         default="general",
         description=(
-            "The category of the search. Use 'news' for real-time events/current headlines, "
-            "'finance' for live stock/crypto/gold prices, 'shopping' when comparing products to purchase, "
-            "and 'general' for facts, documentation, code, or general questions."
+            "Choose the search engine index based on the timeline behavior of the topic:\n"
+            "1. 'news': For any real-time, volatile, or highly current human information (e.g., active politicians, current election results, live sports, celebrity status, breaking global incidents).\n"
+            "2. 'finance': Exclusively for real-time market numbers, stock charts, crypto assets, or commodity pricing.\n"
+            "3. 'shopping': For commercial product links, retail store pages, and consumer buying reviews.\n"
+            "4. 'general': For everything else that is structurally stable, historical, or academic (e.g., programming documentation, historical facts, definitions, math formulas, general concepts)."
         )
     )
     
@@ -49,6 +51,8 @@ class WebSearchResponseSchema(BaseModel):
     sources_used: list[str] = Field(description="List of websites or resources utilized.")
     follow_up_suggestions: list[str] = Field(description="2 suggested next questions for the user.")
 
+tavily_api_key = os.getenv("TAVILY_API_KEY")
+tavily_client = AsyncTavilyClient(api_key=tavily_api_key)
 
 @tool
 async def web_search_tool(params:UniversalWebSearchSchema) -> WebSearchResponseSchema:

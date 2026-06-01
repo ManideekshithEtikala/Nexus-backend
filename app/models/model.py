@@ -16,7 +16,6 @@ class ChatSession(Base):
     title: Mapped[str] = mapped_column(String(255), default="New Conversation")
     summary: Mapped[str | None] = mapped_column(Text, nullable=True) # 👈 Add this to store the running summary!
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    
     messages: Mapped[list["Message"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
 class Message(Base):

@@ -6,7 +6,7 @@ from typing import Any, Dict
 @tool
 async def research_docs_tool(query: str) -> str:
     """
-    A tool to perform research on a given query and return summarized insights along with references.
+    A tool to perform research on a given query and return summarized insights 
     Returns:
     - str: sample test
     """
