@@ -1,8 +1,9 @@
 from enum import Enum
 import os
 import uuid
+import json
 from datetime import datetime
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Literal, Dict
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -23,18 +24,30 @@ from .models import ChatSession, Message
 from .prompts import SYSTEM_PROMPT
 
 # FIXED: Correct clean registry and safe execution wrapper import path
-from .tools.registry import TOOL_REGISTRY, safe_execute_tool
+from .tools.state_immutability import TOOL_REGISTRY, safe_execute_tool
 
 load_dotenv()
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:3002",
+        "http://127.0.0.1:3002",
+        "http://localhost:3005",
+        "http://127.0.0.1:3005",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+#====================================================================
+# 🧠 STEP 1: DEFINE CORE PYDANTIC SCHEMAS
+#=====================================================================
 
 class BehaviourPattern(str, Enum):
     STANDARD_CODING = "STANDARD_CODING"
@@ -55,6 +68,38 @@ class UserMessage(BaseModel):
     message: str
     sessionId: str 
 
+class StandardizedRow(BaseModel):
+    id: str = Field(description="The row item index or identifier (e.g. '1', '2')")
+    content: str = Field(description="The text content, description, value, or benefit for this row.")
+
+class TableColumn(BaseModel):
+    id: str = Field(description="The unique key used for this column inside the row objects. Must match exactly the key name in rows.")
+    name: str = Field(description="The human-readable column display header title (e.g. 'Category', 'AI AgentIC Engineering', 'MLOps').")
+
+class ScalableTable(BaseModel):
+    columns: List[TableColumn] = Field(description="The structural layout columns definition.")
+    rows: List[Dict[str, Any]] = Field(
+        description=(
+            "List of row objects. Crucial: Each row object MUST be a flat dictionary where keys MATCH "
+            "the 'id' fields of your columns exactly. For example, if columns are ['Category', 'MLOps'], "
+            "then rows must look like: {'Category': 'Pros', 'MLOps': 'Provides robust tracing and deployments'}."
+        )
+    )
+
+class UIBlock(BaseModel):
+    block_type: Literal["markdown_text", "citations", "data_table", "action_status"] = Field(
+        description="The target component identifier widget mapping rules."
+    )
+    markdown_text: Optional[str] = Field(default=None, description="Use this field ONLY if block_type is 'markdown_text'")
+    table_data: Optional[ScalableTable] = Field(default=None, description="Use this field ONLY if block_type is 'data_table'")
+
+class ScalableAgentResponseSchema(BaseModel):
+    ui_pipeline: List[UIBlock] = Field(
+        description="An ordered serial list of UI presentation blocks to assemble the final viewport app interface stack."
+    )
+
+
+
 api_key = os.environ["GROQ_API_KEY"]
 tools = list(TOOL_REGISTRY.values())
 llm = ChatGroq(
@@ -62,13 +107,17 @@ llm = ChatGroq(
     temperature=0.1,
     api_key=SecretStr(api_key)
 )
-
 MAX_ITERATIONS = 5
-llm_with_tools = llm.bind_tools(tools)
+
+# =====================================================================
+# ⚙️ STEP 2: INITIALIZE THE dedicated GATEWAY EXTRACTOR CHAIN
+# =====================================================================
+# Temperature 0.0 forces strict adherence to our structural json definitions
+extractor_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0, api_key=SecretStr(api_key))
+structured_extractor = extractor_llm.with_structured_output(ScalableAgentResponseSchema)
 
 class MemoryTaggingSchema(BaseModel):
     is_Important: bool = Field(description="True context if text metadata should be permanently pinned.")
-
 tagging_prompt = ChatPromptTemplate.from_messages([
     ("system", "You are an elite database state memory optimization controller. Evaluate the structural value of the text."),
     ("human", "Analyze the following content and extract if it should be marked as permanently important:\n\nContent: {content}")
@@ -98,7 +147,6 @@ async def populate_state_context(db: AsyncSession, state: AgentState) -> list[Me
     important_msgs = [msg for msg in db_messages if msg.is_Important]
     WINDOW_SIZE = 6
 
-    state.messages.append(SystemMessage(content=SYSTEM_PROMPT.format(summary=state.current_summary)))
     recent_db_messages = db_messages[-WINDOW_SIZE:] if len(db_messages) > WINDOW_SIZE else db_messages
     
     combined_messages = list(dict.fromkeys(important_msgs + list(recent_db_messages)))
@@ -140,6 +188,7 @@ async def compress_old_history_background(chat_session: ChatSession, db_messages
     except Exception as e:
         print(f"Non-blocking summary failure: {e}")
 
+
 @app.post("/api/agent")
 async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db)):
     session_uuid = uuid.UUID(payload.sessionId)
@@ -157,56 +206,84 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
         state.is_user_msg_important = user_classification.is_Important
     except Exception:
         state.is_user_msg_important = False
-
     state.messages.append(HumanMessage(content=payload.message))
     db.add(Message(session_id=session_uuid, role="user", content=payload.message, is_Important=state.is_user_msg_important))
 
     input_length = len(state.messages)
     iteration = 0
     ai_response = ""
-    # =====================================================================
-    # 🔄 STEP 5: TRUE SEQUENTIAL REACT WORKFLOW LOOP
-    # =====================================================================
-    iteration = 0
-    ai_response = ""
 
+    # =====================================================================
+    # 🔄 STEP 3: THE REACT SYSTEM RUNS FULLY IN STRINGS
+    # =====================================================================
+    # Map behavior enums directly to explicit rules and toolsets
+    BEHAVIOUR_MAP = {
+        BehaviourPattern.CASUAL_PRODUCTIVITY: { 
+            "prompt": "You are in CASUAL mode. Answer briefly. DO NOT use search or heavy research tools.",
+            "tools": []  # Stripped completely
+        },
+        BehaviourPattern.DEEP_RESEARCH: {
+            "prompt": "You are an elite Research Analyst. Use tools to gather deep evidentiary logs.",
+            "tools": [TOOL_REGISTRY["web_search_tool"], TOOL_REGISTRY["research_docs_tool"]]
+        },
+        BehaviourPattern.STANDARD_CODING: {
+            "prompt": "You are a senior Software Engineer. Focus purely on clean, production-grade code syntax.",
+            "tools": []  # Add coding tools here when you have them
+        }
+    }
     while iteration < MAX_ITERATIONS:
-        # 1. LLM evaluates the entire timeline and generates its next decision
-        ai_message = await llm_with_tools.ainvoke(state.messages)
+        current_config = BEHAVIOUR_MAP.get(
+            state.current_behaviour, 
+            BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY]
+        )
+        # 🎯 STEP B: DYNAMIC SYSTEM PROMPT INJECTION
+        # Ensure only the active personality rules are present at index 0
+        if state.messages and isinstance(state.messages[0], SystemMessage):
+            state.messages[0] = SystemMessage(content=current_config["prompt"])
+        else:
+            state.messages.insert(0, SystemMessage(content=current_config["prompt"]))
+
+        # 🎯 STEP C: DYNAMIC TOOL BINDING (Weapon Gating)
+        # Re-bind the LLM dynamically with the specific permitted tool list
+        current_llm = llm.bind_tools(current_config["tools"]) if current_config["tools"] else llm
+
+        # 🎯 STEP D: EXECUTE INFERENCE WITH THE BOUNDED MIND
+        ai_message = await current_llm.ainvoke(state.messages)
         state.messages.append(ai_message)
 
-        # 2. If the LLM didn't call a tool, it has reached its final answer!
         if not ai_message.tool_calls:
             ai_response = ai_message.content
             break
-
-        # 3. CRITICAL REACT ARCHITECTURE: Enforce processing exactly ONE tool call at a time.
-        # Even if the LLM hallucinates or outputs multiple tool calls, we only execute the first one.
-        # This forces the agent to look at the observation before making its next move.
         primary_tool_call = ai_message.tool_calls[0]
         tool_name = primary_tool_call["name"]
         tool_args = primary_tool_call["args"]
         tool_call_id = primary_tool_call["id"]
 
-        if tool_name in TOOL_REGISTRY:
+        # 🎯 STEP E: DYNAMIC TOOL EXECUTION FIREWALL
+        # Check if the called tool belongs to the ALLOWED tools for this specific state
+        allowed_tool_names = [t.name for t in current_config["tools"]]
+        
+        if tool_name not in allowed_tool_names:
+            # State Violation Guardrail
+            tool_message = ToolMessage(
+                content=f"ERROR: Access Denied. Tool '{tool_name}' is forbidden under your current state ({state.current_behaviour.value}). You must explicitly transition your behavior state first.",
+                tool_call_id=tool_call_id,
+                status="error"
+            )
+        elif tool_name in TOOL_REGISTRY:
             tool_message = await safe_execute_tool(
                 tool_function=TOOL_REGISTRY[tool_name],
                 tool_input=tool_args,
                 tool_call_id=tool_call_id
             )
         else:
-            # Handle bad tools cleanly inside our immutable timeline
             tool_message = ToolMessage(
-                content=f"ERROR: Tool '{tool_name}' does not exist inside registry. Choose from {list(TOOL_REGISTRY.keys())}.",
+                content=f"ERROR: Tool '{tool_name}' does not exist inside registry.",
                 tool_call_id=tool_call_id,
                 status="error"
             )
 
-        # 4. Append this single observation directly to the conversation state
         state.messages.append(tool_message)
-        
-        # 5. Spin the loop back. The LLM will now read this ToolMessage result,
-        # reason about it, and then decide whether it needs another tool or can answer.
         iteration += 1
 
     if not ai_response:
@@ -216,7 +293,37 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
                 break
 
     # =====================================================================
-    # 📝 STEP 6: EXTRACT AND PERSIST TRANSACTION HISTORY
+    # 🎯 STEP 4: THE GATEWAY EXTRACTION LAYER (The Concept in Action)
+    # =====================================================================
+    # We serialize what the agent just performed over the last few rounds into a clear string report.
+    # This report contains the raw tools data strings + final text thoughts.
+    recent_execution_history = "\n".join([f"{msg.type.upper()}: {msg.content}" for msg in state.messages[input_length:]])
+    extraction_instruction = (
+    f"Analyze the following operational execution logs. Break down the textual narrative thoughts, "
+    f"tool observation reports, and metrics into an ordered sequence of visual UI component block elements matching these strict layout rules:\n\n"
+    f"1. For 'markdown_text' blocks, supply your written response ONLY in the 'markdown_text' field.\n"
+    f"2. For 'data_table' blocks, you must design a complete grid. Define the columns with unique ID values, "
+    f"and map the rows as objects where the keys EXACTLY MATCH your column IDs. "
+    f"Example: If column IDs are ['Category', 'Pros', 'Cons'], then your rows MUST look like: "
+    f"[{{'Category': 'Definition', 'Pros': 'Scalability', 'Cons': 'Complexity'}}]. "
+    f"Return your answer like this: {{\"key\": \"value\"}}"
+    f"Logs to process:\n{recent_execution_history}"
+    )
+    try:
+        # The extraction model reads the string logs and structures them perfectly into our UI pipeline model.
+        # It doesn't matter if we have 2 tools or 200 tools, the model categorizes strings into generic UI elements.
+        final_structured_payload = await structured_extractor.ainvoke(extraction_instruction)
+    except Exception as e:
+        # Resiliency Guardrail: Fallback immediately to a single plain markdown text block if extraction fails
+        print(f"Extraction Layer Fallback Triggered: {str(e)}")
+        final_structured_payload = ScalableAgentResponseSchema(
+            ui_pipeline=[
+                UIBlock(block_type="markdown_text", block_data={"content": ai_response or "Processing complete."})
+            ]
+        )
+
+    # =====================================================================
+    # 📝 STEP 5: EXTRACT AND PERSIST TRANSACTION HISTORY (Unchanged)
     # =====================================================================
     state.new_agent_messages = state.messages[input_length:]
 
@@ -234,7 +341,6 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
                 except Exception:
                     state.is_ai_msg_important = False
         elif role_type == "tool":
-            # Mirrors parse structure inside populate_state_context perfectly
             t_calls = {"id": getattr(msg, "tool_call_id", "legacy_tool_call_id")}
 
         db.add(Message(
@@ -249,4 +355,14 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
     await compress_old_history_background(chat_session, db_messages)
     await db.commit() 
 
-    return {"response": ai_response}
+    # =====================================================================
+    # 🚀 STEP 6: SEND THE NEW STRUCTURED BLOCK PAYLOAD TO FRONTEND
+    # =====================================================================
+    # Instead of just sending raw string '{"response": ai_response}', we return 
+    # the entire type-safe JSON object configuration map!
+    return {
+        "status": "success",
+        "session_id": payload.sessionId,
+        "current_summary": state.current_summary,
+        "data": final_structured_payload.model_dump() 
+    }

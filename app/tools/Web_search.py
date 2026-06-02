@@ -4,100 +4,58 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 from typing import Optional, Literal
 from tavily import AsyncTavilyClient
+
 dotenv.load_dotenv()
-#This Schema is used so when ever we give query to the agent it fills this schema with the infomraito that we had given and sends to the llm and the llm will give a professionoal response right? so this reponse is send to the pydantic model response_output function so then we get a proper json perfeclty 
-class UniversalWebSearchSchema(BaseModel):
-    query: str = Field(
-        description=(
-            "The search query compressed into 2-4 strict keywords. "
-            "Remove all conversational phrases, questions, and temporal filler words. "
-            "Example: 'Who won the basketball game last night?' becomes 'basketball game score'."
-        )
-    )
-    
-    topic: Literal["general", "news", "finance", "shopping"] = Field(
-        default="general",
-        description=(
-            "Choose the search engine index based on the timeline behavior of the topic:\n"
-            "1. 'news': For any real-time, volatile, or highly current human information (e.g., active politicians, current election results, live sports, celebrity status, breaking global incidents).\n"
-            "2. 'finance': Exclusively for real-time market numbers, stock charts, crypto assets, or commodity pricing.\n"
-            "3. 'shopping': For commercial product links, retail store pages, and consumer buying reviews.\n"
-            "4. 'general': For everything else that is structurally stable, historical, or academic (e.g., programming documentation, historical facts, definitions, math formulas, general concepts)."
-        )
-    )
-    
-    time_range: Literal["any", "day", "week", "month", "year"] = Field(
-        default="any",
-        description=(
-            "Filters results by how recently they were published. CRITICAL: Set to 'day' or 'week' "
-            "if the user explicitly mentions 'today', 'latest', or asks about fast-moving events."
-        )
-    )
-    
-    max_results: int = Field(
-        default=5,
-        ge=1,
-        le=10,
-        description="The total number of high-quality results to fetch. Use higher numbers (8-10) for shopping or deep research tasks."
-    )
-    
-    restrict_to_site: Optional[str] = Field(
-        default=None,
-        description="Optional domain to restrict results to (e.g., 'amazon.com' for shopping, 'wikipedia.org' for general facts)."
-    )
-#output schema for the web search tool
-class WebSearchResponseSchema(BaseModel):
-    main_answer: str = Field(description="The deep, professional answer to the user query.")
-    sources_used: list[str] = Field(description="List of websites or resources utilized.")
-    follow_up_suggestions: list[str] = Field(description="2 suggested next questions for the user.")
 
 tavily_api_key = os.getenv("TAVILY_API_KEY")
 tavily_client = AsyncTavilyClient(api_key=tavily_api_key)
 
-@tool
-async def web_search_tool(params:UniversalWebSearchSchema) -> WebSearchResponseSchema:
-    """
-    A tool to perform optimized web searches across categories like news, finance, and shopping.
-    Returns structured markdown summaries, context URLs, and logical follow-ups.
-    """
-    # 1. Map your custom schema parameters into Tavily's native arguments
-    # Note: Tavily does not natively support "shopping" as a topic, map it to general
-    tavily_topic = "general" if params.topic == "shopping" else params.topic
-    
-    # Map 'any' to None so Tavily doesn't filter out older valid pages
-    tavily_time_range = None if params.time_range == "any" else params.time_range
-    
-    # Map restrict_to_site domain array if it exists
-    include_domains = [params.restrict_to_site] if params.restrict_to_site else None
+# 1. Keep ONLY your input validation model (ensures Groq sends flat, safe parameters)
+class UniversalWebSearchSchema(BaseModel):
+    query: str = Field(description="The search query compressed into 2-4 strict keywords.")
+    topic: Literal["general", "news", "finance", "shopping"] = "general"
+    time_range: Literal["any", "day", "week", "month", "year"] = "any"
+    max_results: int = 5
+    restrict_to_site: Optional[str] = None
 
-    # 2. Execute the asynchronous search and request Tavily's built-in advanced LLM answer
+@tool(args_schema=UniversalWebSearchSchema)
+async def web_search_tool(
+    query: str,
+    topic: Literal["general", "news", "finance", "shopping"] = "general",
+    time_range: Literal["any", "day", "week", "month", "year"] = "any",
+    max_results: int = 5,
+    restrict_to_site: Optional[str] = None
+) -> str: #  FORCE return hint to 'str'
+    """
+    Optimized web search engine capability spanning multiple indices.
+    """
+    tavily_topic = "general" if topic == "shopping" else topic
+    tavily_time_range = None if time_range == "any" else time_range
+    include_domains = [restrict_to_site] if restrict_to_site else None
+
+    # Run the network execution
     response = await tavily_client.search(
-        query=params.query,
+        query=query,
         topic=tavily_topic,
         time_range=tavily_time_range,
-        max_results=params.max_results,
+        max_results=max_results,
         include_domains=include_domains,
         include_answer=True,
-        search_depth="advanced",  # Pulls a high-quality summary directly from Tavily
+        search_depth="advanced",
     )
 
-    # 3. Extract the clean tracking data from the response payload
-    raw_answer = response.get("answer", "No direct summary generated by search provider.")
+    raw_answer = response.get("answer", "No direct automated text summary available.")
     
-    # Collect unique URLs from search results
-    urls = [result.get("url") for result in response.get("results", []) if result.get("url")]
+    # Extract URLs into a clean, identifiable section
+    urls = [r.get("url") for r in response.get("results", []) if r.get("url")]
     unique_sources = list(set(urls))
+    sources_block = "\n".join(f"- {url}" for url in unique_sources) or "No sources found."
 
-    # Generate basic follow-up hints based on the results 
-    # (The main agent can later expand these naturally)
-    follow_ups = [
-        f"Can you provide more historical context regarding {params.query}?",
-        f"What are the immediate practical applications or next updates for this topic?"
-    ]
-
-    # 4. Return the fully populated structural output model back to the agent ecosystem
-    return WebSearchResponseSchema(
-        main_answer=raw_answer,
-        sources_used=unique_sources,
-        follow_up_suggestions=follow_ups
+    # 🎯 PRODUCTION ARCHITECTURE: Serialize everything into a unified text bridge block!
+    return (
+        f"=== WEB SEARCH TOOL EXECUTION REPORT ===\n"
+        f"SEARCH_QUERY: {query}\n"
+        f"SUMMARY_ANSWER: {raw_answer}\n\n"
+        f"EXTRACTED_SOURCES:\n{sources_block}\n"
+        f"========================================"
     )
