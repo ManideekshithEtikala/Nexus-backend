@@ -63,6 +63,8 @@ class AgentState(BaseModel):
     is_ai_msg_important: bool = False
     new_agent_messages: List[BaseMessage] = Field(default_factory=list)
     current_behaviour: BehaviourPattern = Field(default=BehaviourPattern.CASUAL_PRODUCTIVITY)
+    
+    model_config = {"arbitrary_types_allowed": True}
 
 class UserMessage(BaseModel):
     message: str
@@ -103,7 +105,7 @@ class ScalableAgentResponseSchema(BaseModel):
 api_key = os.environ["GROQ_API_KEY"]
 tools = list(TOOL_REGISTRY.values())
 llm = ChatGroq(
-    model="llama-3.3-70b-versatile",
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
     temperature=0.1,
     api_key=SecretStr(api_key)
 )
@@ -124,10 +126,10 @@ tagging_prompt = ChatPromptTemplate.from_messages([
 ])
 classifier_chain = tagging_prompt | llm.with_structured_output(MemoryTaggingSchema)
 
-@app.on_event("startup")
-async def startup_event():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+# @app.on_event("startup")
+# async def startup_event():
+#     async with engine.begin() as conn:
+#         await conn.run_sync(Base.metadata.create_all)
 
 async def get_or_create_session(db: AsyncSession, session_id: str, first_message: str) -> ChatSession:
     session_result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
@@ -209,89 +211,109 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
     state.messages.append(HumanMessage(content=payload.message))
     db.add(Message(session_id=session_uuid, role="user", content=payload.message, is_Important=state.is_user_msg_important))
 
-    input_length = len(state.messages)
-    iteration = 0
-    ai_response = ""
-
     # =====================================================================
     # 🔄 STEP 3: THE REACT SYSTEM RUNS FULLY IN STRINGS
     # =====================================================================
-    # Map behavior enums directly to explicit rules and toolsets
     BEHAVIOUR_MAP = {
         BehaviourPattern.CASUAL_PRODUCTIVITY: { 
-            "prompt": "You are in CASUAL mode. Answer briefly. DO NOT use search or heavy research tools.",
-            "tools": []  # Stripped completely
+            "prompt": (
+                "You are in CASUAL mode. Answer briefly. "
+                "CRITICAL: If the user asks for web searches, recent news, or complex research, "
+                "you MUST immediately call the 'change_behaviour_profile' tool to transition to 'DEEP_RESEARCH'. "
+                "Do NOT attempt to use any other tools."
+            ),
+            "tools": [TOOL_REGISTRY.get("change_behaviour_profile")] if "change_behaviour_profile" in TOOL_REGISTRY else []
         },
         BehaviourPattern.DEEP_RESEARCH: {
             "prompt": "You are an elite Research Analyst. Use tools to gather deep evidentiary logs.",
-            "tools": [TOOL_REGISTRY["web_search_tool"], TOOL_REGISTRY["research_docs_tool"]]
+            "tools": [TOOL_REGISTRY.get("web_search_tool"), TOOL_REGISTRY.get("research_docs_tool"), TOOL_REGISTRY.get("change_behaviour_profile")]
         },
         BehaviourPattern.STANDARD_CODING: {
             "prompt": "You are a senior Software Engineer. Focus purely on clean, production-grade code syntax.",
-            "tools": []  # Add coding tools here when you have them
+            "tools": [TOOL_REGISTRY.get("change_behaviour_profile")] if "change_behaviour_profile" in TOOL_REGISTRY else []
         }
     }
+
+    # 1. INITIAL PROMPT INJECTION (Ensure index 0 exists before loop) here the defualt value is = BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY]
+    initial_config = BEHAVIOUR_MAP.get(state.current_behaviour, BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY])
+    if state.messages and isinstance(state.messages[0], SystemMessage):
+        state.messages[0] = SystemMessage(content=initial_config["prompt"])
+    else:
+        state.messages.insert(0, SystemMessage(content=initial_config["prompt"]))
+
+    # 2. LOCK ARRAY LENGTH *AFTER* PROMPT INJECTION!
+    input_length = len(state.messages)
+    iteration = 0
+    ai_response = ""
+    #ReAct loop - the agent will decide to call tools or not, and we dynamically update the system prompt and tool bindings based on the current behaviour state. The loop continues until the agent stops calling tools or we hit a max iteration guardrail.
     while iteration < MAX_ITERATIONS:
-        current_config = BEHAVIOUR_MAP.get(
-            state.current_behaviour, 
-            BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY]
-        )
-        # 🎯 STEP B: DYNAMIC SYSTEM PROMPT INJECTION
-        # Ensure only the active personality rules are present at index 0
-        if state.messages and isinstance(state.messages[0], SystemMessage):
-            state.messages[0] = SystemMessage(content=current_config["prompt"])
-        else:
-            state.messages.insert(0, SystemMessage(content=current_config["prompt"]))
+        # 3. DYNAMIC RE-EVALUATION: Must happen INSIDE the loop so mutations take effect!
+        current_config = BEHAVIOUR_MAP.get(state.current_behaviour, BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY])
+        
+        # Force-update index 0 in case the state changed on the last iteration
+        state.messages[0] = SystemMessage(content=current_config["prompt"])
 
-        # 🎯 STEP C: DYNAMIC TOOL BINDING (Weapon Gating)
-        # Re-bind the LLM dynamically with the specific permitted tool list
-        current_llm = llm.bind_tools(current_config["tools"]) if current_config["tools"] else llm
 
-        # 🎯 STEP D: EXECUTE INFERENCE WITH THE BOUNDED MIND
+        # Strip None values just in case a tool didn't load properly in the registry
+        active_tools = [t for t in current_config["tools"] if t is not None]
+        print(f"🛠️ [DEBUG] Tools actually being bound this iteration: {[t.name for t in active_tools]}")
+        # 4. RE-BIND TOOLS DYNAMICALLY
+        current_llm = llm.bind_tools(active_tools) if active_tools else llm
+
         ai_message = await current_llm.ainvoke(state.messages)
-        state.messages.append(ai_message)
+        state.messages.append(ai_message) # the message here ai sends is that it has some informaiot it should cal some tools or it should just answwer the question so in the ReAct way 
 
         if not ai_message.tool_calls:
             ai_response = ai_message.content
             break
+            
         primary_tool_call = ai_message.tool_calls[0]
         tool_name = primary_tool_call["name"]
         tool_args = primary_tool_call["args"]
         tool_call_id = primary_tool_call["id"]
-
-        # 🎯 STEP E: DYNAMIC TOOL EXECUTION FIREWALL
-        # Check if the called tool belongs to the ALLOWED tools for this specific state
-        allowed_tool_names = [t.name for t in current_config["tools"]]
         
-        if tool_name not in allowed_tool_names:
-            # State Violation Guardrail
+        # 🚀 THE STATE MUTATOR INTERCEPTOR
+        if tool_name == "change_behaviour_profile":
+            requested_state = tool_args.get("new_profile")
+            print(f"🚀 [STATE MUTATION] Agent requested transition to: {requested_state}")
+            
+            if requested_state in BehaviourPattern.__members__:
+                state.current_behaviour = BehaviourPattern[requested_state]
+            
             tool_message = ToolMessage(
-                content=f"ERROR: Access Denied. Tool '{tool_name}' is forbidden under your current state ({state.current_behaviour.value}). You must explicitly transition your behavior state first.",
+                content=f"System context mutated to {state.current_behaviour.value}. You now have access to new tools.",
+                tool_call_id=tool_call_id,
+                status="success"
+            )
+            state.messages.append(tool_message)
+            iteration += 1
+            
+            # RESTART LOOP - Steps 3 & 4 will now grab the new DEEP_RESEARCH tools!
+            continue
+
+        # 🎯 DYNAMIC TOOL EXECUTION FIREWALL
+        allowed_tool_names = [t.name for t in active_tools]
+        #if no tools is there in the tools you have created 
+        if tool_name not in allowed_tool_names:
+            tool_message = ToolMessage(
+                content=f"ERROR: Access Denied. Tool '{tool_name}' is forbidden under your current state ({state.current_behaviour.value}).",
                 tool_call_id=tool_call_id,
                 status="error"
             )
         elif tool_name in TOOL_REGISTRY:
-            tool_message = await safe_execute_tool(
-                tool_function=TOOL_REGISTRY[tool_name],
-                tool_input=tool_args,
-                tool_call_id=tool_call_id
-            )
+            tool_message = await safe_execute_tool(TOOL_REGISTRY[tool_name], tool_args, tool_call_id)
         else:
-            tool_message = ToolMessage(
-                content=f"ERROR: Tool '{tool_name}' does not exist inside registry.",
-                tool_call_id=tool_call_id,
-                status="error"
-            )
+            tool_message = ToolMessage(content=f"ERROR: Tool missing.", tool_call_id=tool_call_id, status="error")
 
         state.messages.append(tool_message)
         iteration += 1
 
+    # FINAL CHECK: If we exit the loop due to max iterations but never got a clean response, we take the last AI message content as the fallback answer to ensure we always return something meaningful to the user.
     if not ai_response:
         for msg in reversed(state.messages[input_length:]):
             if isinstance(msg, AIMessage) and msg.content:
                 ai_response = msg.content
                 break
-
     # =====================================================================
     # 🎯 STEP 4: THE GATEWAY EXTRACTION LAYER (The Concept in Action)
     # =====================================================================
@@ -315,10 +337,11 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
         final_structured_payload = await structured_extractor.ainvoke(extraction_instruction)
     except Exception as e:
         # Resiliency Guardrail: Fallback immediately to a single plain markdown text block if extraction fails
+        safe_text = str(ai_response) if ai_response else "Processing complete."
         print(f"Extraction Layer Fallback Triggered: {str(e)}")
         final_structured_payload = ScalableAgentResponseSchema(
             ui_pipeline=[
-                UIBlock(block_type="markdown_text", block_data={"content": ai_response or "Processing complete."})
+                UIBlock(block_type="markdown_text", markdown_text=safe_text)
             ]
         )
 
@@ -326,31 +349,43 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
     # 📝 STEP 5: EXTRACT AND PERSIST TRANSACTION HISTORY (Unchanged)
     # =====================================================================
     state.new_agent_messages = state.messages[input_length:]
-
+    
+    # We loop through the new messages generated in this session and persist them with proper role tagging and tool call metadata. This ensures our database reflects the full context of the agent's thought process, tool usage, and final response.
     for msg in state.new_agent_messages:
-        role_type = "assistant" if isinstance(msg, AIMessage) else "tool"
+        # 1. Default variables for this specific iteration
         content_payload = str(msg.content) if msg.content else ""
         t_calls = None
-        
-        if role_type == "assistant":
+        role_type = None
+
+        # 2. Safely route and process based on explicit types
+        if isinstance(msg, AIMessage):
+            role_type = "assistant"
             t_calls = msg.tool_calls if hasattr(msg, 'tool_calls') else None
+            
+            # Run AI memory tagging only for assistant messages with content
             if msg.content:
                 try:
                     ai_classification = await classifier_chain.ainvoke({"content": msg.content})
                     state.is_ai_msg_important = ai_classification.is_Important
                 except Exception:
                     state.is_ai_msg_important = False
-        elif role_type == "tool":
+                    
+        elif isinstance(msg, ToolMessage):
+            role_type = "tool"
             t_calls = {"id": getattr(msg, "tool_call_id", "legacy_tool_call_id")}
+            state.is_ai_msg_important = False 
+            
+        else:
+            continue 
 
+         # 4. Safely commit the strictly validated variables
         db.add(Message(
             session_id=session_uuid, 
             role=role_type, 
             content=content_payload, 
-            tool_calls=t_calls,
-            is_Important=state.is_ai_msg_important if role_type == "assistant" else False
+                tool_calls=t_calls,
+            is_Important=state.is_ai_msg_important
         ))
-
     await db.flush() 
     await compress_old_history_background(chat_session, db_messages)
     await db.commit() 
