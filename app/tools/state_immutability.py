@@ -1,61 +1,92 @@
+import json
 import traceback
+from typing import Dict, Any, Tuple
+from pydantic import ValidationError
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool
+
 from app.tools.Web_search import web_search_tool
 from app.tools.Research_docs import research_docs_tool
+from app.tools.change_behaviour_tool import change_behaviour_profile
 
 # Centralized array tracking all tools
 ALL_TOOLS = [
     web_search_tool,
     research_docs_tool,
+    change_behaviour_profile
 ]
 
 # Automated dynamic map binding tool name -> tool instance
 TOOL_REGISTRY = {tool.name: tool for tool in ALL_TOOLS}
 
-async def safe_execute_tool(tool_function, tool_input: dict, tool_call_id: str) -> ToolMessage:
+
+def validate_tool_input(tool: BaseTool, raw_input: Any) -> Tuple[bool, Any, str]:
     """
-    Executes an agent tool securely, capturing any data or failure as an 
-    immutable entry in the chat history instead of crashing.
+    Pre-Execution Firewall: Validates incoming arguments against a tool's 
+    Pydantic schema BEFORE invocation. Resolves single responsibility routing.
     """
-    try:
-        # Run tool function logic asynchronously
-        result = await tool_function.ainvoke(tool_input)
-        
+    # 1. Normalize JSON string inputs if the LLM bypassed formatting
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except json.JSONDecodeError as e:
+            return False, None, f"Arguments were not valid JSON. Details: {str(e)}."
+
+    # 2. Extract the tool's underlying Pydantic model schema
+    # LangChain tools expose their schema via args_schema
+    schema_model = tool.args_schema
+
+    if schema_model:
+        try:
+            # Proactively validate data structurally against the Pydantic model
+            validated_data = schema_model(**raw_input if isinstance(raw_input, dict) else {})
+            # Return Python dictionary from validated Pydantic model
+            return True, validated_data.model_dump(), ""
+        except ValidationError as e:
+            # Parse error locations and error definitions cleanly
+            readable_errors = [
+                f"[{' -> '.join(str(x) for x in err.get('loc', []))}]: {err.get('msg', 'Invalid value')}"
+                for err in e.errors()
+            ]
+            return False, None, f"Schema Validation Error: {'; '.join(readable_errors)}."
+            
+    return True, raw_input, ""
+
+
+async def safe_execute_tool(tool_function: BaseTool, tool_input: Any, tool_call_id: str) -> ToolMessage:
+    """
+    Executes an agent tool securely. Relies on decoupled pre-validation middleware 
+    to guarantee a clean execution run.
+    """
+    tool_name = tool_function.name
+
+    # Step 1: Run the Pre-Execution Firewall Check
+    is_valid, sanitized_input, error_feedback = validate_tool_input(tool_function, tool_input)
+    
+    if not is_valid:
+        print(f"🛑 [FIREWALL INTERCEPT] Validation failed for tool '{tool_name}': {error_feedback}")
         return ToolMessage(
-            content=str(result), #  Ensures tool response data is strictly written as plain string context
-            tool_call_id=tool_call_id,
-            status="success"
-        )
-    except Exception as e:
-        error_context = f"Tool Execution Failure: {str(e)}\nTraceback: {traceback.format_exc()}"
-        print(error_context)  
-        
-        return ToolMessage(
-            content=f"ERROR: Tool failed to execute. Reason: {str(e)}. Please attempt a different approach or tool fallback.",
+            content=f"Error initializing tool '{tool_name}': {error_feedback} Please correct your input parameters and try again.",
             tool_call_id=tool_call_id,
             status="error"
         )
-    """
-    Executes an agent tool securely, capturing any failure as an 
-    immutable entry in the chat history instead of crashing.
-    """
+
+    # Step 2: Clean Execution Layer (We know the data type is guaranteed correct)
     try:
-        # Asynchronously run tool execution instance
-        result = await tool_function.ainvoke(tool_input)
+        print(f"🔥 [FIREWALL PASSED] Executing '{tool_name}' with safe args: {sanitized_input}")
+        result = await tool_function.ainvoke(sanitized_input)
         
         return ToolMessage(
-            content=str(result),
+            content=str(result), 
             tool_call_id=tool_call_id,
             status="success"
         )
+
     except Exception as e:
-        # State Immutability: System Firewall logs context server-side
-        error_context = f"Tool Execution Failure: {str(e)}\nTraceback: {traceback.format_exc()}"
-        print(error_context)  
-        
-        # Returns a clean message containing error payloads back to LLM context
+        # This catch block ONLY handles actual runtime exceptions inside the tool (e.g. network timeout)
+        print(f"💥 [RUNTIME CRASH] Internal tool error in '{tool_name}': {str(e)}")
         return ToolMessage(
-            content=f"ERROR: Tool failed to execute. Reason: {str(e)}. Please attempt a different approach or tool fallback.",
+            content=f"Runtime Error: Tool '{tool_name}' failed internally. Reason: {str(e)}.",
             tool_call_id=tool_call_id,
             status="error"
         )
