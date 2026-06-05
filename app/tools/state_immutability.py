@@ -1,7 +1,9 @@
 import json
 import traceback
+from typing import Dict, Any, Tuple
 from pydantic import ValidationError
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import BaseTool
 
 from app.tools.Web_search import web_search_tool
 from app.tools.Research_docs import research_docs_tool
@@ -17,29 +19,62 @@ ALL_TOOLS = [
 # Automated dynamic map binding tool name -> tool instance
 TOOL_REGISTRY = {tool.name: tool for tool in ALL_TOOLS}
 
-async def safe_execute_tool(tool_function, tool_input: dict, tool_call_id: str) -> ToolMessage:
+
+def validate_tool_input(tool: BaseTool, raw_input: Any) -> Tuple[bool, Any, str]:
     """
-    Executes an agent tool securely. Acts as a Pydantic Firewall to intercept 
-    execution and schema errors, formatting them cleanly back into the agentic loop.
+    Pre-Execution Firewall: Validates incoming arguments against a tool's 
+    Pydantic schema BEFORE invocation. Resolves single responsibility routing.
+    """
+    # 1. Normalize JSON string inputs if the LLM bypassed formatting
+    if isinstance(raw_input, str):
+        try:
+            raw_input = json.loads(raw_input)
+        except json.JSONDecodeError as e:
+            return False, None, f"Arguments were not valid JSON. Details: {str(e)}."
+
+    # 2. Extract the tool's underlying Pydantic model schema
+    # LangChain tools expose their schema via args_schema
+    schema_model = tool.args_schema
+
+    if schema_model:
+        try:
+            # Proactively validate data structurally against the Pydantic model
+            validated_data = schema_model(**raw_input if isinstance(raw_input, dict) else {})
+            # Return Python dictionary from validated Pydantic model
+            return True, validated_data.model_dump(), ""
+        except ValidationError as e:
+            # Parse error locations and error definitions cleanly
+            readable_errors = [
+                f"[{' -> '.join(str(x) for x in err.get('loc', []))}]: {err.get('msg', 'Invalid value')}"
+                for err in e.errors()
+            ]
+            return False, None, f"Schema Validation Error: {'; '.join(readable_errors)}."
+            
+    return True, raw_input, ""
+
+
+async def safe_execute_tool(tool_function: BaseTool, tool_input: Any, tool_call_id: str) -> ToolMessage:
+    """
+    Executes an agent tool securely. Relies on decoupled pre-validation middleware 
+    to guarantee a clean execution run.
     """
     tool_name = tool_function.name
-    
-    # 1. Input Firewall: Catch corrupted JSON strings if the LLM bypassed dict formatting
-    if isinstance(tool_input, str):
-        try:
-            tool_input = json.loads(tool_input)
-        except json.JSONDecodeError as e:
-            print(f"🛑 [FIREWALL INTERCEPT] JSONDecodeError on '{tool_name}'")
-            return ToolMessage(
-                content=f"Validation Error for tool '{tool_name}': Arguments were not valid JSON. Details: {str(e)}. Please correct your JSON formatting.",
-                tool_call_id=tool_call_id,
-                status="error"
-            )
 
+    # Step 1: Run the Pre-Execution Firewall Check
+    is_valid, sanitized_input, error_feedback = validate_tool_input(tool_function, tool_input)
+    
+    if not is_valid:
+        print(f"🛑 [FIREWALL INTERCEPT] Validation failed for tool '{tool_name}': {error_feedback}")
+        return ToolMessage(
+            content=f"Error initializing tool '{tool_name}': {error_feedback} Please correct your input parameters and try again.",
+            tool_call_id=tool_call_id,
+            status="error"
+        )
+
+    # Step 2: Clean Execution Layer (We know the data type is guaranteed correct)
     try:
-        # 2. Execution Layer
-        print(f"🔥 [FIREWALL PASSED] Executing '{tool_name}' with args: {tool_input}")
-        result = await tool_function.ainvoke(tool_input)
+        print(f"🔥 [FIREWALL PASSED] Executing '{tool_name}' with safe args: {sanitized_input}")
+        result = await tool_function.ainvoke(sanitized_input)
         
         return ToolMessage(
             content=str(result), 
@@ -47,38 +82,11 @@ async def safe_execute_tool(tool_function, tool_input: dict, tool_call_id: str) 
             status="success"
         )
 
-    # 3. Output/Validation Firewall: Catch specific Pydantic schema violations
-    except ValidationError as e:
-        error_details = e.errors()
-        readable_errors = []
-        for err in error_details:
-            loc = " -> ".join(str(x) for x in err.get("loc", []))
-            msg = err.get("msg", "Invalid value")
-            readable_errors.append(f"[{loc}]: {msg}")
-        
-        error_msg = "; ".join(readable_errors)
-        print(f"🛑 [FIREWALL INTERCEPT] Pydantic ValidationError on '{tool_name}': {error_msg}")
-        
-        return ToolMessage(
-            content=f"Schema Validation Error for tool '{tool_name}': {error_msg}. Please fix your argument types and try again.",
-            tool_call_id=tool_call_id,
-            status="error"
-        )
-
-    # 4. Standard Python Type/Value bounds (e.g. missing positional arguments)
-    except (TypeError, ValueError) as e:
-        print(f"🛑 [FIREWALL INTERCEPT] Python Type/Value Error on '{tool_name}': {str(e)}")
-        return ToolMessage(
-            content=f"Argument Error for tool '{tool_name}': {str(e)}. Ensure you are matching the tool's required parameters.",
-            tool_call_id=tool_call_id,
-            status="error"
-        )
-
-    # 5. Fallback for catastrophic internal tool failures (e.g. API timeouts)
     except Exception as e:
-        print(f"💥 [RUNTIME CRASH] Unexpected crash inside tool '{tool_name}': {str(e)}")
+        # This catch block ONLY handles actual runtime exceptions inside the tool (e.g. network timeout)
+        print(f"💥 [RUNTIME CRASH] Internal tool error in '{tool_name}': {str(e)}")
         return ToolMessage(
-            content=f"ERROR: Tool '{tool_name}' failed to execute internally. Reason: {str(e)}. Please attempt a different approach or tool fallback.",
+            content=f"Runtime Error: Tool '{tool_name}' failed internally. Reason: {str(e)}.",
             tool_call_id=tool_call_id,
             status="error"
         )
