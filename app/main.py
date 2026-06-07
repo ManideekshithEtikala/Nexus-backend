@@ -390,7 +390,9 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
 {permanent_memory}
 
 INSTRUCTIONS:
-Chat casually. Do not use complex tools. If the user asks for deep research or coding, use the change_behaviour_profile tool immediately."""
+1. Chat casually. 
+2. EXTREMELY IMPORTANT: You are connected to a real-world execution engine. If the user asks you to perform an action (like sending an email), DO NOT say "I cannot do this as an AI". You MUST immediately use the provided tool to execute the action.
+3. If the user asks for deep research or coding, use the change_behaviour_profile tool immediately."""
             )
         },
         BehaviourPattern.DEEP_RESEARCH: {

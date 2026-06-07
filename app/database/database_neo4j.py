@@ -12,7 +12,14 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "Ju2TciNqoyqV5Gk1vMO5MeI7WebXI8BxnM
 class Neo4jConnection:
     def __init__(self):
         # Initialize the asynchronous driver
-        self.driver = AsyncGraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASSWORD))
+        self.driver = AsyncGraphDatabase.driver(
+            NEO4J_URI, 
+            auth=(NEO4J_USER, NEO4J_PASSWORD),
+            keep_alive=True,                # Send TCP keep-alive pings
+            max_connection_lifetime=300,    # Recycle connections every 5 minutes before they die
+            max_connection_pool_size=50,    # Cap the pool size
+            connection_timeout=15.0
+            )
 
     async def close(self):
         await self.driver.close()
