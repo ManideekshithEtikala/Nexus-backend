@@ -131,6 +131,18 @@ class ScalableAgentResponseSchema(BaseModel):
         description="An ordered serial list of UI presentation blocks to assemble the final viewport app interface stack."
     )
 
+#pydantic model to extract the necessary tool information from the llm based on the user messgage and we use a simple llm for this so that no heavy process is there
+class ToolSelection(BaseModel):
+    selected_tools: List[str] = Field(
+        description="A list of the tool names selected from the registry. MUST always include 'change_behaviour_profile'."
+    )
+
+class ResumeAction(BaseModel):
+    sessionId: str
+    tool_name: str
+    tool_args: dict
+    tool_call_id: str
+    is_approved: bool
 
 api_key = os.environ["GROQ_API_KEY"]
 tools = list(TOOL_REGISTRY.values())
@@ -140,7 +152,8 @@ llm = ChatGroq(
     api_key=SecretStr(api_key),
 )
 MAX_ITERATIONS = 5
-
+# Tools that can modify state, spend money, or communicate externally
+REQUIRES_APPROVAL_TOOLS = ["send_email"]
 # =====================================================================
 # ⚙️ STEP 2: INITIALIZE THE dedicated GATEWAY EXTRACTOR CHAIN
 # =====================================================================
@@ -252,7 +265,58 @@ async def compress_old_history_background(chat_session: ChatSession, db_messages
     except Exception as e:
         print(f"Non-blocking summary failure: {e}")
 
+#the function which actauly routes the tools based on the user message and the current state of the agent and this is called in the main loop of the agent and based on the user message and the current state of the agent it will select the tools from the registry and bind them to the llm for that iteration
+async def semantic_tool_router(user_text: str, current_state: str) -> List[Any]:
+    """
+    Scans the global TOOL_REGISTRY and dynamically selects the best tools for the current prompt.
+    """
+    # 1. Build a list of all available tools and their descriptions for the LLM to read
+    registry_info = "\n".join([f"- Name: {name} | Description: {tool.description}" for name, tool in TOOL_REGISTRY.items()])
 
+    # 2. The Strict Routing Prompt
+    # 2. The Strict Routing Prompt
+    routing_prompt = f"""
+    CRITICAL SYSTEM INSTRUCTION: You are a strict JSON routing controller.
+    The user is currently in state: {current_state}.
+    User message: "{user_text}"
+    
+    Global Tool Registry:
+    {registry_info}
+    
+    INSTRUCTIONS:
+    1. ALWAYS include 'change_behaviour_profile' in your list so the agent can switch states.
+    2. Select up to 2 additional tools that are highly relevant to the User message.
+    
+    FINAL WARNING: You MUST output pure JSON. Do not add any extra keys.
+    Your output MUST exactly match this JSON structure:
+    {{"selected_tools": ["change_behaviour_profile", "other_tool"]}}
+    """
+
+    try:
+        # 3. Use the fast 8B model in JSON mode to act as the router
+        router_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0, api_key=SecretStr(api_key))
+        router = router_llm.with_structured_output(ToolSelection, method="json_mode")
+        
+        selection = await router.ainvoke(routing_prompt)
+        selected_tool_names = selection.selected_tools
+        print(f"🧠 [ROUTER] Selected tools: {selected_tool_names}")
+        
+        # 4. Map the string names back to actual LangChain Tool objects
+        active_tools = []
+        for name in selected_tool_names:
+            if name in TOOL_REGISTRY:
+                active_tools.append(TOOL_REGISTRY[name])
+                
+        # Failsafe: Ensure transition tool is always present
+        if TOOL_REGISTRY["change_behaviour_profile"] not in active_tools:
+            active_tools.append(TOOL_REGISTRY["change_behaviour_profile"])
+            
+        return active_tools
+
+    except Exception as e:
+        print(f"⚠️ Router failed, falling back to safe defaults: {e}")
+        return [TOOL_REGISTRY["change_behaviour_profile"]]
+    
 @app.post("/api/agent")
 async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db)):
     session_uuid = uuid.UUID(payload.sessionId)
@@ -327,12 +391,7 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
 
 INSTRUCTIONS:
 Chat casually. Do not use complex tools. If the user asks for deep research or coding, use the change_behaviour_profile tool immediately."""
-            ),
-            "tools": (
-                [TOOL_REGISTRY.get("change_behaviour_profile")]
-                if "change_behaviour_profile" in TOOL_REGISTRY
-                else []
-            ),
+            )
         },
         BehaviourPattern.DEEP_RESEARCH: {
             "prompt": (
@@ -344,12 +403,7 @@ Chat casually. Do not use complex tools. If the user asks for deep research or c
 [PERMANENT FACTS - GRAPH MEMORY]
 WARNING: The facts below are the absolute truth about the user. They OVERRIDE any conflicting information found in the conversational summary above.
 {permanent_memory}"""
-            ),
-            "tools": [
-                TOOL_REGISTRY.get("web_search_tool"),
-                TOOL_REGISTRY.get("research_docs_tool"),
-                TOOL_REGISTRY.get("change_behaviour_profile"),
-            ],
+            )
         },
         BehaviourPattern.STANDARD_CODING: {
             "prompt": (
@@ -361,12 +415,7 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
 [PERMANENT FACTS - GRAPH MEMORY]
 WARNING: The facts below are the absolute truth about the user. They OVERRIDE any conflicting information found in the conversational summary above.
 {permanent_memory}"""
-            ),
-            "tools": (
-                [TOOL_REGISTRY.get("change_behaviour_profile")]
-                if "change_behaviour_profile" in TOOL_REGISTRY
-                else []
-            ),
+            )
         },
     }
 
@@ -406,10 +455,12 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
         # Force-update index 0 in case the state changed on the last iteration
         state.messages[0] = SystemMessage(content=formatted_loop_prompt)
 
-        # Strip None values just in case a tool didn't load properly in the registry
-        active_tools = [t for t in current_config["tools"] if t is not None]
-        print(
-            f"🛠️ [DEBUG] Tools actually being bound this iteration: {[t.name for t in active_tools]}"
+
+        # 🚀 PHASE 4: DYNAMIC TOOL ROUTING
+        # Instead of pulling from current_config["tools"], we dynamically fetch them!
+        active_tools = await semantic_tool_router(
+            user_text=payload.message, 
+            current_state=state.current_behaviour.value
         )
         # 4. RE-BIND TOOLS DYNAMICALLY
         current_llm = llm.bind_tools(active_tools) if active_tools else llm
@@ -450,27 +501,55 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
             continue
 
         # 🎯 DYNAMIC TOOL EXECUTION FIREWALL
+        # 🎯 DYNAMIC TOOL EXECUTION FIREWALL
         allowed_tool_names = [t.name for t in active_tools]
-        # if no tools is there in the tools you have created
+        
         if tool_name not in allowed_tool_names:
             tool_message = ToolMessage(
                 content=f"ERROR: Access Denied. Tool '{tool_name}' is forbidden under your current state ({state.current_behaviour.value}).",
                 tool_call_id=tool_call_id,
                 status="error",
             )
+            state.messages.append(tool_message)
+            iteration += 1
+            
         elif tool_name in TOOL_REGISTRY:
+            # 🛑 PHASE 5: HUMAN-IN-THE-LOOP INTERCEPTOR
+            if tool_name in REQUIRES_APPROVAL_TOOLS:
+                print(f"🛑 [HIBERNATION TRIGGERED] Tool '{tool_name}' requires human approval.")
+                
+                # 1. Save the exact tool execution request to our database so we can resume it later
+                state.new_agent_messages = state.messages[input_length:]
+                
+                # (You would normally run your db.add() loop here to save the exact state before sleeping)
+                
+                # 2. Break the loop and return the special Approval Payload directly to the frontend
+                return {
+                    "status": "requires_approval",
+                    "session_id": payload.sessionId,
+                    "pending_action": {
+                        "tool_name": tool_name,
+                        "tool_args": tool_args,
+                        "tool_call_id": tool_call_id
+                    },
+                    "message": f"The agent wants to execute {tool_name}. Do you approve?"
+                }
+
+            # If it's a safe tool (like web search), execute it normally
             tool_message = await safe_execute_tool(
                 TOOL_REGISTRY[tool_name], tool_args, tool_call_id
             )
+            state.messages.append(tool_message)
+            iteration += 1
+            
         else:
             tool_message = ToolMessage(
                 content=f"ERROR: Tool missing.",
                 tool_call_id=tool_call_id,
                 status="error",
             )
-
-        state.messages.append(tool_message)
-        iteration += 1
+            state.messages.append(tool_message)
+            iteration += 1
 
     # FINAL CHECK: If we exit the loop due to max iterations but never got a clean response, we take the last AI message content as the fallback answer to ensure we always return something meaningful to the user.
     if not ai_response:
@@ -571,6 +650,124 @@ WARNING: The facts below are the absolute truth about the user. They OVERRIDE an
     # =====================================================================
     # Instead of just sending raw string '{"response": ai_response}', we return
     # the entire type-safe JSON object configuration map!
+    return {
+        "status": "success",
+        "session_id": payload.sessionId,
+        "current_summary": state.current_summary,
+        "data": final_structured_payload.model_dump(),
+    }
+
+
+@app.post("/api/agent/resume")
+async def resume_agent(payload: ResumeAction, db: AsyncSession = Depends(get_db)):
+    """
+    Catches the human's approval/rejection, executes the pending tool (if approved),
+    and resumes the ReAct loop.
+    """
+    session_uuid = uuid.UUID(payload.sessionId)
+    chat_session = await get_or_create_session(db, str(session_uuid), "Resumed Session")
+
+    # 1. Rebuild the Agent's Brain from PostgreSQL
+    state = AgentState(
+        session_id=payload.sessionId, current_summary=chat_session.summary or ""
+    )
+    db_messages = await populate_state_context(db, state)
+    input_length = len(state.messages)
+
+    # 2. INJECT THE HUMAN'S DECISION
+    if payload.is_approved:
+        print(f"✅ [HUMAN APPROVED] Executing paused tool: {payload.tool_name}")
+        # Actually execute the tool now!
+        tool_message = await safe_execute_tool(
+            TOOL_REGISTRY[payload.tool_name], payload.tool_args, payload.tool_call_id
+        )
+    else:
+        print(f"❌ [HUMAN REJECTED] Cancelling tool: {payload.tool_name}")
+        # Inject a strict failure so the LLM knows it was denied
+        tool_message = ToolMessage(
+            content=f"ERROR: The human explicitly REJECTED this action. Do not try again. Apologize and ask what they would like to do instead.",
+            tool_call_id=payload.tool_call_id,
+            status="error"
+        )
+        
+    state.messages.append(tool_message)
+
+    # 3. RESUME THE REACT LOOP
+    permanent_facts_text = await neo4j_client.fetch_user_graph_facts()
+    iteration = 0
+    ai_response = ""
+
+    while iteration < MAX_ITERATIONS:
+        # Dynamically fetch tools so the agent still has capabilities
+        active_tools = await semantic_tool_router(
+            user_text="User just responded to an approval request.", 
+            current_state=state.current_behaviour.value
+        )
+        current_llm = llm.bind_tools(active_tools) if active_tools else llm
+
+        # The LLM wakes up, reads the human's decision, and decides what to say next!
+        ai_message = await current_llm.ainvoke(state.messages)
+        state.messages.append(ai_message)
+
+        if not ai_message.tool_calls:
+            ai_response = ai_message.content
+            break
+
+        # If it tries to use MORE tools, handle them safely (standard firewall)
+        primary_tool_call = ai_message.tool_calls[0]
+        tool_name = primary_tool_call["name"]
+        tool_args = primary_tool_call["args"]
+        tool_call_id = primary_tool_call["id"]
+        
+        if tool_name in TOOL_REGISTRY:
+            tool_msg = await safe_execute_tool(TOOL_REGISTRY[tool_name], tool_args, tool_call_id)
+            state.messages.append(tool_msg)
+        iteration += 1
+
+    if not ai_response:
+        for msg in reversed(state.messages[input_length:]):
+            if isinstance(msg, AIMessage) and msg.content:
+                ai_response = msg.content
+                break
+
+    # 4. RUN THE UI EXTRACTOR (Exactly the same as your main route)
+    recent_execution_history = "\n".join(
+        [f"{msg.type.upper()}: {msg.content}" for msg in state.messages[input_length:]]
+    )
+    extraction_instruction = (
+        f"CRITICAL SYSTEM INSTRUCTION: You are a strict JSON data parser. Output pure JSON matching the schema.\n\n"
+        f"Logs to process:\n{recent_execution_history}"
+    )
+    try:
+        final_structured_payload = await structured_extractor.ainvoke(extraction_instruction)
+    except Exception as e:
+        final_structured_payload = ScalableAgentResponseSchema(
+            ui_pipeline=[UIBlock(block_type="markdown_text", markdown_text=str(ai_response))]
+        )
+
+    # 5. SAVE NEW MESSAGES TO DB
+    state.new_agent_messages = state.messages[input_length:]
+    for msg in state.new_agent_messages:
+        content_payload = str(msg.content) if msg.content else ""
+        t_calls = None
+        role_type = None
+
+        if isinstance(msg, AIMessage):
+            role_type = "assistant"
+            t_calls = msg.tool_calls if hasattr(msg, "tool_calls") else None
+        elif isinstance(msg, ToolMessage):
+            role_type = "tool"
+            t_calls = {"id": getattr(msg, "tool_call_id", "legacy_tool_call_id")}
+        else:
+            continue
+
+        db.add(Message(
+            session_id=session_uuid, role=role_type, content=content_payload, tool_calls=t_calls, is_Important=False
+        ))
+        
+    await db.commit()
+
+    # 6. RETURN FINAL PAYLOAD TO FRONTEND
     return {
         "status": "success",
         "session_id": payload.sessionId,

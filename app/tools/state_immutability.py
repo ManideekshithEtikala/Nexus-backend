@@ -8,15 +8,50 @@ from langchain_core.tools import BaseTool
 from app.tools.Web_search import web_search_tool
 from app.tools.Research_docs import research_docs_tool
 from app.tools.change_behaviour_tool import change_behaviour_profile
+from pydantic import BaseModel, Field
+from langchain_core.tools import tool
+import json
 
-# Centralized array tracking all tools
+# 1. DEFINE SCHEMA AND TOOL FIRST
+class SendEmailSchema(BaseModel):
+    to_address: str = Field(
+        description="The exact email address of the recipient."
+    )
+    subject: str = Field(
+        description="A concise and professional subject line for the email."
+    )
+    body: str = Field(
+        description="The complete markdown-formatted text body of the email."
+    )
+
+@tool("send_email", args_schema=SendEmailSchema)
+def send_email_tool(to_address: str, subject: str, body: str) -> str:
+    """
+    Sends an email to a specified recipient. 
+    Use this tool ONLY when the user explicitly requests to send an email, contact someone, or share a report via email.
+    """
+    print(f"\n" + "="*50)
+    print(f"🚀 [EXTERNAL ACTION SIMULATION] Executing send_email_tool")
+    print(f"TO: {to_address}")
+    print(f"SUBJECT: {subject}")
+    print(f"BODY:\n{body}")
+    print("="*50 + "\n")
+
+    return json.dumps({
+        "status": "success",
+        "message": f"Email successfully sent to {to_address}"
+    })
+
+
+# 2. ADD IT TO THE MASTER ARRAY
 ALL_TOOLS = [
     web_search_tool,
     research_docs_tool,
-    change_behaviour_profile
+    change_behaviour_profile,
+    send_email_tool     # 👈 CRITICAL: Added here!
 ]
 
-# Automated dynamic map binding tool name -> tool instance
+# 3. CREATE THE REGISTRY
 TOOL_REGISTRY = {tool.name: tool for tool in ALL_TOOLS}
 
 
@@ -51,7 +86,6 @@ def validate_tool_input(tool: BaseTool, raw_input: Any) -> Tuple[bool, Any, str]
             return False, None, f"Schema Validation Error: {'; '.join(readable_errors)}."
             
     return True, raw_input, ""
-
 
 async def safe_execute_tool(tool_function: BaseTool, tool_input: Any, tool_call_id: str) -> ToolMessage:
     """

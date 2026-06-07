@@ -57,15 +57,23 @@ class Neo4jConnection:
                 await session.run(query, name=node['entity_name'])
 
             # 2. Merge all Edges dynamically
+            # UPDATE YOUR EDGE LOOP:
             if "edges" in graph_data:
                 for edge in graph_data["edges"]:
-                    # 1. Grab the raw relation string from the LLM
-                    raw_relation = edge.get("relation", "RELATED_TO")
                     
-                    # 2. SANITIZE IT: Uppercase it and replace all spaces/dashes with underscores
+                    # 1. Safely extract IDs whether the LLM calls them "source" or "source_node"
+                    source_id = edge.get("source") or edge.get("source_node")
+                    target_id = edge.get("target") or edge.get("target_node")
+                    
+                    # Failsafe: if both are missing, skip this edge
+                    if not source_id or not target_id:
+                        continue
+
+                    # 2. Grab and sanitize the relation
+                    raw_relation = edge.get("relation", "RELATED_TO")
                     safe_relation = raw_relation.upper().replace(" ", "_").replace("-", "_")
 
-                    # 3. Use the safe_relation in the Cypher query
+                    # 3. Execute the Cypher query
                     query = f"""
                     MATCH (source {{id: $source_id}})
                     MATCH (target {{id: $target_id}})
@@ -73,8 +81,8 @@ class Neo4jConnection:
                     """
                     await session.run(
                         query,
-                        source_id=edge["source"],
-                        target_id=edge["target"]
+                        source_id=source_id,
+                        target_id=target_id
                     )
                 
 # Instantiate a singleton client for FastAPI to use
