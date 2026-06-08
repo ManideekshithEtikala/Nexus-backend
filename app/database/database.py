@@ -7,29 +7,30 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker
 )
 from sqlalchemy.orm import DeclarativeBase
-import ssl
 
 load_dotenv()
 
 DATABASE_URL: str = os.environ["DATABASE_URL"]
 
-# Create SSL context for Supabase
-ssl_context = ssl.create_default_context()
-ssl_context.check_hostname = True
-ssl_context.verify_mode = ssl.CERT_REQUIRED
+# Ensure the URL uses the correct asyncpg dialect scheme
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 engine = create_async_engine(
     DATABASE_URL,
-    echo=True,
+    echo=False,           # Turn off verbose echo in production to preserve log space
     future=True,
-    pool_size=5,
+    pool_size=4,          # Safe ceiling for Supabase free-tier connection limits
     max_overflow=2,
-    pool_pre_ping=True,  # Test connections before using them
-    pool_recycle=3600,   # Recycle connections every hour
+    pool_pre_ping=True,   # Optimistically tests connections before running queries
+    pool_recycle=1800,    # Recycle connections every 30 minutes to drop dead sockets
     connect_args={
-        "ssl": ssl_context,
-        "timeout": 10,
-        "command_timeout": 10,
+        "ssl": "require",          # Let asyncpg negotiate the SSL layer securely without hardcoded contexts
+        "timeout": 30,             # Protect against cold-start network drops
+        "command_timeout": 30,
+        "statement_cache_size": 0   # CRITICAL: Disables prepared statements so you can use poolers safely
     }
 )
 
