@@ -10,12 +10,12 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_groq import ChatGroq
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
-
+from sqlalchemy import text
 # 🏗️ ARCHITECTURE SERVICES (Our clean, isolated files!)
 from .database import get_db
 from .database.database_neo4j import neo4j_client
 from .models.model import Message
-from .prompts import SYSTEM_PROMPT
+
 from .tools.state_immutability import TOOL_REGISTRY, safe_execute_tool
 from .core.schema import AgentState, UserMessage, ResumeAction, BehaviourPattern, KnowledgeGraphUpdate
 
@@ -43,6 +43,20 @@ llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", temperature=0.
 MAX_ITERATIONS = 5
 REQUIRES_APPROVAL_TOOLS = ["send_email"]
 
+
+@app.get("/api/health")
+async def database_check(db: AsyncSession = Depends(get_db)):
+    """Validates connectivity to both PostgreSQL (Supabase) and Neo4j."""
+    try:
+        # 1. Test PostgreSQL
+        await db.execute(text("SELECT 1"))
+        
+        # 2. Test Neo4j
+        await neo4j_client.test_connection()
+        
+        return {"status": "healthy", "postgres": "connected", "neo4j": "connected"}
+    except Exception as e:
+        return {"status": "unhealthy", "error": str(e)}
 # =====================================================================
 # 🛣️ ROUTE 1: PRIMARY AGENT ENDPOINT
 # =====================================================================

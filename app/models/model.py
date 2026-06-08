@@ -4,7 +4,7 @@ from sqlalchemy import String, ForeignKey, DateTime, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from typing import List
 from pydantic import BaseModel, Field
-from app.database import Base
+from database.database import Base
 
 from sqlalchemy import String, DateTime, Text # Import Text
 # ... other imports ...
