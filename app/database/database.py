@@ -7,19 +7,30 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker
 )
 from sqlalchemy.orm import DeclarativeBase
+import ssl
 
 load_dotenv()
 
 DATABASE_URL: str = os.environ["DATABASE_URL"]
-# Make sure DATABASE_URL uses postgresql+asyncpg:// in your .env
+
+# Create SSL context for Supabase
+ssl_context = ssl.create_default_context()
+ssl_context.check_hostname = True
+ssl_context.verify_mode = ssl.CERT_REQUIRED
 
 engine = create_async_engine(
     DATABASE_URL,
     echo=True,
     future=True,
-    pool_size=10,
-    max_overflow=5,
-    connect_args={"ssl": "require"}  # ← Fixed for Supabase
+    pool_size=5,
+    max_overflow=2,
+    pool_pre_ping=True,  # Test connections before using them
+    pool_recycle=3600,   # Recycle connections every hour
+    connect_args={
+        "ssl": ssl_context,
+        "timeout": 10,
+        "command_timeout": 10,
+    }
 )
 
 async_session_local = async_sessionmaker(
