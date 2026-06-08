@@ -51,16 +51,45 @@ REQUIRES_APPROVAL_TOOLS = ["send_email"]
 @app.get("/api/health")
 async def database_check(db: AsyncSession = Depends(get_db)):
     """Validates connectivity to both PostgreSQL (Supabase) and Neo4j."""
+    postgres_status = "pending"
+    neo4j_status = "pending"
+    postgres_error = None
+    neo4j_error = None
+    
+    # 1. Test PostgreSQL with timeout
     try:
-        # 1. Test PostgreSQL
-        await db.execute(text("SELECT 1"))
-        
-        # 2. Test Neo4j
-        await neo4j_client.test_connection()
-        
-        return {"status": "healthy", "postgres": "connected", "neo4j": "connected"}
+        # Use asyncio timeout to prevent hanging
+        import asyncio
+        await asyncio.wait_for(db.execute(text("SELECT 1")), timeout=5.0)
+        postgres_status = "connected"
+    except asyncio.TimeoutError:
+        postgres_status = "timeout"
+        postgres_error = "Database query timed out after 5 seconds"
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}
+        postgres_status = "failed"
+        postgres_error = str(e)
+    
+    # 2. Test Neo4j with timeout
+    try:
+        import asyncio
+        await asyncio.wait_for(neo4j_client.test_connection(), timeout=5.0)
+        neo4j_status = "connected"
+    except asyncio.TimeoutError:
+        neo4j_status = "timeout"
+        neo4j_error = "Neo4j connection timed out after 5 seconds"
+    except Exception as e:
+        neo4j_status = "failed"
+        neo4j_error = str(e)
+    
+    overall_status = "healthy" if postgres_status == "connected" and neo4j_status == "connected" else "unhealthy"
+    
+    return {
+        "status": overall_status,
+        "postgres": postgres_status,
+        "postgres_error": postgres_error,
+        "neo4j": neo4j_status,
+        "neo4j_error": neo4j_error
+    }
 # =====================================================================
 # 🛣️ ROUTE 1: PRIMARY AGENT ENDPOINT
 # =====================================================================

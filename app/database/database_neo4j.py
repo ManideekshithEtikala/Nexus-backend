@@ -24,6 +24,16 @@ class Neo4jConnection:
     async def close(self):
         await self.driver.close()
     
+    async def test_connection(self) -> bool:
+        """Test if Neo4j connection is working."""
+        try:
+            async with self.driver.session() as session:
+                await session.run("RETURN 1")
+            return True
+        except Exception as e:
+            print(f"Neo4j connection failed: {e}")
+            return False
+    
     async def fetch_user_graph_facts(self) -> str:
         """
         Fetches all relationships connected to the User to inject into the ReAct prompt.

@@ -50,7 +50,7 @@ marshmallow==3.26.2
 msgspec==0.21.1
 multidict==6.7.1
 mypy_extensions==1.1.0
-neo4j==5.28.1
+neo4j==5.20.0
 networkx==3.6.1
 numpy==2.4.6
 orjson==3.11.9
