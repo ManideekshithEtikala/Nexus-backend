@@ -28,6 +28,7 @@ google-genai==2.4.0
 
 # Relational Graph Memory
 networkx>=3.0
+neo4j==5.28.1
 
 # Speech & Voice Integration (Phase 5)
 edge-tts>=6.1.1
