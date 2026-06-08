@@ -31,24 +31,3 @@ class Message(Base):
     is_Important: Mapped[bool] = mapped_column(default=False) # Flag for important messages
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
     
-#graph schema models
-class GraphNode(BaseModel):
-    entity_name: str = Field(description="The specific name of the entity (e.g., 'Alex', 'Max', 'Python').")
-    
-    # 🔓 OPEN ONTOLOGY: Instruct HOW to categorize, not WHAT to categorize
-    entity_type: str = Field(
-        description="Dynamically infer the generic Category of the entity in PascalCase (e.g., 'User', 'Dog', 'FamilyMember', 'Technology')."
-    )
-
-class GraphEdge(BaseModel):
-    source_node: str = Field(description="The entity_name of the source node.")
-    
-    # 🔓 OPEN ONTOLOGY: Enforce syntax, allow semantic freedom
-    relation: str = Field(
-        description="Dynamically infer the relationship verb. MUST be generalized, in UPPERCASE_SNAKE_CASE, and maximum 3 words (e.g., 'BUILDS_WITH', 'LOVES', 'HATES', 'WORKS_AT')."
-    )
-    
-    target_node: str = Field(description="The entity_name of the target node.")
-class KnowledgeGraphUpdate(BaseModel):
-    nodes: List[GraphNode]
-    edges: List[GraphEdge]
