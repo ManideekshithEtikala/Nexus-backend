@@ -233,7 +233,7 @@ INSTRUCTIONS:
             t_calls = {"id": getattr(msg, "tool_call_id", "legacy")}
             db.add(Message(session_id=session_uuid, role="tool", content=content_payload, tool_calls=t_calls, is_Important=False))
 
-    await db.flush()
+    await db.flush() #its like staging area similar to github not commiting but staging
     await compress_old_history_background(chat_session, db_messages)
     await db.commit()
 
