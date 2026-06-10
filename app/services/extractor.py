@@ -9,22 +9,10 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from app.core.schema import ScalableAgentResponseSchema, UIBlock
 
 groq_api_key = os.environ.get("GROQ_API_KEY")
-api_key = SecretStr(groq_api_key)
+if not groq_api_key:
+    raise RuntimeError("GROQ_API_KEY is not set")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WHY WE NO LONGER USE .with_structured_output():
-#
-#   .with_structured_output() routes through Groq's function-calling layer.
-#   Llama models occasionally emit:  <function=SchemaName>{json}</function>
-#   instead of a proper tool-call response. Groq's API validator rejects that
-#   with:  400 tool_use_failed — crashing the entire request.
-#
-#   This happens non-deterministically in production (longer context, richer
-#   web search content) but not locally (short, simple prompts).
-#
-#   FIX: Prompt the model to return raw JSON as plain text, then parse +
-#   validate it ourselves with Pydantic. No function-calling layer involved.
-# ─────────────────────────────────────────────────────────────────────────────
+api_key = SecretStr(groq_api_key)
 
 # Plain LLM — NO .with_structured_output(), NO tools bound
 extractor_llm = ChatGroq(
@@ -32,39 +20,56 @@ extractor_llm = ChatGroq(
 )
 
 _SYSTEM_PROMPT = """
-You are a strict JSON data parser. Output ONLY a single raw JSON object — no markdown fences, no explanation, no preamble.
+You convert agent execution results into a clean UI JSON response.
 
-The JSON object must match this exact shape:
+Return exactly one valid JSON object and nothing else.
+
+Valid schema:
 {
   "ui_pipeline": [
-    // one or more block objects
+    {
+      "block_type": "markdown_text",
+      "markdown_text": "string"
+    }
   ]
 }
 
-Each block must have a "block_type" field. Allowed blocks:
+Allowed blocks:
 
-1. markdown_text block:
-   {"block_type": "markdown_text", "markdown_text": "<your markdown string>"}
+{
+  "block_type": "markdown_text",
+  "markdown_text": "string"
+}
 
-2. data_table block:
-   {
-     "block_type": "data_table",
-     "table_data": {
-       "columns": [{"id": "Col1", "name": "Col1"}, {"id": "Col2", "name": "Col2"}],
-       "rows": [{"Col1": "value", "Col2": "value"}]
-     }
-   }
-   RULE: Row keys MUST exactly match column IDs.
+{
+  "block_type": "data_table",
+  "table_data": {
+    "columns": [{"id": "source", "name": "Source"}],
+    "rows": [{"source": "Example"}]
+  }
+}
 
-3. code_block block:
-   {"block_type": "code_block", "language": "python", "code": "<code string>"}
+{
+  "block_type": "code_block",
+  "language": "python",
+  "code": "print(\\"hello\\")"
+}
 
-CRITICAL RULES:
-- Output ONLY the raw JSON object. Nothing else.
-- NEVER wrap output in <function=...> tags.
-- NEVER add text before or after the JSON.
-""".strip()
-
+Rules:
+- Output valid JSON only.
+- No markdown fences.
+- No comments.
+- No extra text before or after the JSON.
+- Escape all quotes inside string values.
+- Combine all normal explanatory text into as few markdown_text blocks as possible.
+- Do NOT split one answer into many tiny markdown blocks.
+- Do NOT expose chain-of-thought, internal reasoning, or raw agent scratchpad text.
+- Create a data_table only when the content is naturally tabular.
+- Prefer this structure:
+  1. one markdown_text block for the final answer
+  2. optional data_table block
+  3. optional code_block
+"""
 #helper function to strip unnecessary tags generated my llm
 def _strip_artifacts(raw: str) -> str:
     """
@@ -84,7 +89,17 @@ def _strip_artifacts(raw: str) -> str:
 
     return raw.strip()
 
-
+async def extract_json_from_text(raw: str) -> str:
+    try:
+        response = await extractor_llm.ainvoke([
+            SystemMessage(content="Extract and return only the valid JSON object from the following text. Return JSON only."),
+            HumanMessage(content=raw)
+        ])
+        return response.content if hasattr(response, "content") else str(response)
+    except Exception as e:
+        print(f"Error in extract_json_from_text: {e}")
+        return raw
+        
 async def generate_ui_pipeline(new_messages: list, fallback_text: str) -> ScalableAgentResponseSchema:
     """
     Takes the raw messages generated during the ReAct loop and forces them through
@@ -99,24 +114,19 @@ async def generate_ui_pipeline(new_messages: list, fallback_text: str) -> Scalab
         [f"{msg.type.upper()}: {msg.content}" for msg in new_messages]
     )
 
-    extraction_instruction = (
-        f"CRITICAL SYSTEM INSTRUCTION: You are a strict JSON data parser, NOT a chatbot. "
-        f"DO NOT include conversational filler, greetings, or explanations. "
-        f"DO NOT output phrases like 'Here are the links' or 'Here is your table'.\n\n"
+    extraction_instruction = f"""
+Transform the following agent execution content into a clean user-facing UI response.
 
-        f"Analyze the following operational execution logs. Break down the textual narrative thoughts, "
-        f"tool observation reports, and metrics into an ordered sequence of visual UI component block elements matching these strict layout rules:\n\n"
+Content:
+{recent_execution_history}
 
-        f"1. For 'markdown_text' blocks, supply your written response ONLY in the 'markdown_text' field.\n"
-        f"2. For 'data_table' blocks, you must design a complete grid. Define the columns with unique ID values, "
-        f"and map the rows as objects where the keys EXACTLY MATCH your column IDs. "
-        f"Example: If column IDs are ['Category', 'Pros', 'Cons'], then your rows MUST look like: "
-        f"[{{'Category': 'Definition', 'Pros': 'Scalability', 'Cons': 'Complexity'}}]. \n\n"
-
-        f"Logs to process:\n{recent_execution_history}\n\n"
-        f"FINAL WARNING: Output ONLY the raw JSON object. Any other text will crash the system."
-    )
-
+Important:
+- Produce a polished final answer for the user.
+- Merge related text into one markdown_text block whenever possible.
+- Do not include internal reasoning, tool traces, or repeated intermediate steps unless they are useful to the user.
+- Only include a data_table if there is real structured data worth showing.
+- Return valid JSON only.
+""".strip()
     # ── Layer 1: Call the LLM without function-calling ────────────────────────
     try:
         response = await extractor_llm.ainvoke([
@@ -125,24 +135,20 @@ async def generate_ui_pipeline(new_messages: list, fallback_text: str) -> Scalab
         ])
 
         raw_text = response.content if hasattr(response, "content") else str(response)
+        repaired_text = await extract_json_from_text(raw_text)
+        cleaned = _strip_artifacts(repaired_text)
+        parsed_dict = json.loads(cleaned)
+        validated = ScalableAgentResponseSchema(**parsed_dict)
 
-        # ── Layer 2: Clean → parse → validate ────────────────────────────────
-        try:
-            cleaned = _strip_artifacts(raw_text)
-            parsed_dict = json.loads(cleaned)
-            validated = ScalableAgentResponseSchema(**parsed_dict)
-            print("✅ [EXTRACTOR] Pipeline parsed and validated successfully.")
-            return validated
+        print("✅ [EXTRACTOR] Pipeline parsed and validated successfully.")
+        return validated
 
-        except (json.JSONDecodeError, ValidationError, TypeError, KeyError) as parse_err:
-            print(f"⚠️ [EXTRACTOR] Parse/validation failed: {parse_err}")
-            # Fall through to Layer 3
+    except (json.JSONDecodeError, ValidationError, TypeError, KeyError) as parse_err:
+        print(f"⚠️ [EXTRACTOR] Parse/validation failed: {parse_err}")
 
     except Exception as llm_err:
         print(f"⚠️ [EXTRACTOR] LLM call failed: {llm_err}")
-        # Fall through to Layer 3
 
-    # ── Layer 3: Safe fallback — never crash the endpoint ────────────────────
     print("🛟 [EXTRACTOR] Fallback triggered — returning plain markdown block.")
     safe_text = str(fallback_text) if fallback_text else "Processing complete."
     return ScalableAgentResponseSchema(
