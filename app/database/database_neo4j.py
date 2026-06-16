@@ -5,9 +5,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Load credentials from your .env file
-NEO4J_URI = os.getenv("NEO4J_URI", "neo4j+s://92592dcd.databases.neo4j.io")
-NEO4J_USER = os.getenv("NEO4J_USER", "92592dcd")
-NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "zTyYePNglaoZB5gYDafwvZ7NZA2hrXEnrQrACcDGLJo")
+NEO4J_URI = os.getenv("NEO4J_URI")
+NEO4J_USER = os.getenv("NEO4J_USER")
+NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 
 class Neo4jConnection:
     def __init__(self):
