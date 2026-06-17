@@ -48,6 +48,7 @@ class AgentGraphState(TypedDict, total=False):
     # --- Loop control ---
     iteration: int
 
+    user_id:str
     # --- Tool routing ---
     active_tool_names: List[str]
 

@@ -47,12 +47,12 @@ from app.core.schema import BehaviourPattern
 SYSTEM_MESSAGE_ID = "system-prompt"
 
 
-async def get_or_create_session(db: AsyncSession, session_id: str, first_message: str) -> ChatSession:
+async def get_or_create_session(db: AsyncSession, session_id: str,user_id:str, first_message: str) -> ChatSession:
     """Fetches an existing chat session from PostgreSQL, or creates a new one."""
-    session_result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
+    session_result = await db.execute(select(ChatSession).where(ChatSession.id == session_id , ChatSession.user_id == user_id))
     chat_session = session_result.scalar_one_or_none()
     if not chat_session:
-        chat_session = ChatSession(id=session_id, title=first_message[:30], summary="")
+        chat_session = ChatSession(id=session_id,user_id=user_id, title=first_message[:30], summary="")
         db.add(chat_session)
         await db.commit()
     return chat_session
@@ -81,8 +81,9 @@ async def load_context_node(state: AgentGraphState, db: AsyncSession, user_messa
     """
     session_id = state["session_id"]
     session_uuid = uuid.UUID(session_id)
+    user_id=state["user_id"]
 
-    chat_session = await get_or_create_session(db, session_id, user_message)
+    chat_session = await get_or_create_session(db, session_id,user_id, user_message)
 
     update: dict = {
         "current_summary": chat_session.summary or "",

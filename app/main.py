@@ -19,9 +19,10 @@ from app.database import get_db
 from app.database.database import DATABASE_URL
 from app.database.database_neo4j import neo4j_client
 from app.core.schema import UserMessage, ResumeAction, KnowledgeGraphUpdate
-
+from app.core.auth import get_current_user
 from app.graph.agent_graph import build_graph
 
+from psycopg_pool import AsyncConnectionPool
 # =====================================================================
 # ⚙️ SYSTEM INITIALIZATION
 # =====================================================================
@@ -30,11 +31,6 @@ load_dotenv()
 api_key = os.environ["GROQ_API_KEY"]
 
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from psycopg_pool import AsyncConnectionPool
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from app.database.database import DATABASE_URL  # points to your environment string
 
 
 @asynccontextmanager
@@ -130,7 +126,11 @@ async def database_check(db: AsyncSession = Depends(get_db)):
 # 🛣️ ROUTE 1: PRIMARY AGENT ENDPOINT
 # =====================================================================
 @app.post("/api/agent")
-async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db)):
+async def user_message(
+    payload: UserMessage,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user),
+):
     """
     The main gateway. Builds the agent graph for this request and runs it.
     `thread_id` = session_id, so the checkpointer keeps each session's
@@ -160,6 +160,7 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
 
     initial_state = {
         "session_id": payload.sessionId,
+        "user_id":user_id
     }
 
     result = await compiled_graph.ainvoke(initial_state, config=config)
@@ -189,7 +190,11 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
 # 🛣️ ROUTE 2: RESUME HIBERNATED AGENT
 # =====================================================================
 @app.post("/api/agent/resume")
-async def resume_agent(payload: ResumeAction, db: AsyncSession = Depends(get_db)):
+async def resume_agent(
+    payload: ResumeAction,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user),
+):
     """
     Resumes a graph that was paused by interrupt() inside the `tools` node.
     """

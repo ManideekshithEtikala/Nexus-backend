@@ -64,7 +64,7 @@ async def persist_messages_node(state: AgentGraphState, db: AsyncSession) -> dic
 
     # Re-fetch full ordered history for compression (matches original
     # `db_messages` semantics: everything saved for this session so far).
-    session_result = await db.execute(select(ChatSession).where(ChatSession.id == session_id))
+    session_result = await db.execute(select(ChatSession).where(ChatSession.id == session_id,ChatSession.user_id ==state["user_id"]))
     chat_session = session_result.scalar_one()
 
     msg_result = await db.execute(
