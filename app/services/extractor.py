@@ -70,7 +70,9 @@ Rules:
   2. optional data_table block
   3. optional code_block
 """
-#helper function to strip unnecessary tags generated my llm
+
+
+# helper function to strip unnecessary tags generated my llm
 def _strip_artifacts(raw: str) -> str:
     """
     Cleans common LLM output artifacts before JSON parsing:
@@ -89,18 +91,75 @@ def _strip_artifacts(raw: str) -> str:
 
     return raw.strip()
 
+
+def _sanitize_json_control_chars(raw: str) -> str:
+    """
+    Fixes the most common cause of 'Invalid control character at: line X column Y'
+    errors: the LLM emits LITERAL newlines/tabs inside a JSON string value
+    (very common when the string contains a code block), instead of the
+    properly escaped \\n / \\t sequences valid JSON requires.
+
+    This walks the raw text character by character, tracking whether we are
+    INSIDE a JSON string (between unescaped double quotes). Any raw control
+    character (newline, tab, carriage return) found while inside a string is
+    replaced with its escaped equivalent. Characters outside strings (the
+    JSON structure itself: {, }, [, ], commas, real newlines for readability)
+    are left untouched.
+    """
+    result = []
+    in_string = False
+    escape_next = False
+
+    for ch in raw:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+            continue
+
+        if ch == "\\":
+            result.append(ch)
+            escape_next = True
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            result.append(ch)
+            continue
+
+        if in_string and ch == "\n":
+            result.append("\\n")
+            continue
+        if in_string and ch == "\t":
+            result.append("\\t")
+            continue
+        if in_string and ch == "\r":
+            result.append("\\r")
+            continue
+
+        result.append(ch)
+
+    return "".join(result)
+
+
 async def extract_json_from_text(raw: str) -> str:
     try:
-        response = await extractor_llm.ainvoke([
-            SystemMessage(content="Extract and return only the valid JSON object from the following text. Return JSON only."),
-            HumanMessage(content=raw)
-        ])
+        response = await extractor_llm.ainvoke(
+            [
+                SystemMessage(
+                    content="Extract and return only the valid JSON object from the following text. Return JSON only."
+                ),
+                HumanMessage(content=raw),
+            ]
+        )
         return response.content if hasattr(response, "content") else str(response)
     except Exception as e:
         print(f"Error in extract_json_from_text: {e}")
         return raw
-        
-async def generate_ui_pipeline(new_messages: list, fallback_text: str) -> ScalableAgentResponseSchema:
+
+
+async def generate_ui_pipeline(
+    new_messages: list, fallback_text: str
+) -> ScalableAgentResponseSchema:
     """
     Takes the raw messages generated during the ReAct loop and forces them through
     a strict JSON schema for the React frontend to render as UI Blocks.
@@ -129,15 +188,26 @@ Important:
 """.strip()
     # ── Layer 1: Call the LLM without function-calling ────────────────────────
     try:
-        response = await extractor_llm.ainvoke([
-            SystemMessage(content=_SYSTEM_PROMPT),
-            HumanMessage(content=extraction_instruction),
-        ])
+        response = await extractor_llm.ainvoke(
+            [
+                SystemMessage(content=_SYSTEM_PROMPT),
+                HumanMessage(content=extraction_instruction),
+            ]
+        )
 
         raw_text = response.content if hasattr(response, "content") else str(response)
         repaired_text = await extract_json_from_text(raw_text)
         cleaned = _strip_artifacts(repaired_text)
-        parsed_dict = json.loads(cleaned)
+
+        try:
+            parsed_dict = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Most common cause: literal newlines/tabs inside a JSON string
+            # value (e.g. a code_block's "code" field). Sanitize and retry
+            # once before giving up.
+            sanitized = _sanitize_json_control_chars(cleaned)
+            parsed_dict = json.loads(sanitized)
+
         validated = ScalableAgentResponseSchema(**parsed_dict)
 
         print("✅ [EXTRACTOR] Pipeline parsed and validated successfully.")
