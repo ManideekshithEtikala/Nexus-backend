@@ -19,7 +19,7 @@ from app.database import get_db
 from app.database.database import DATABASE_URL
 from app.database.database_neo4j import neo4j_client
 from app.core.schema import UserMessage, ResumeAction, KnowledgeGraphUpdate
-
+from app.core.auth import get_current_user
 from app.graph.agent_graph import build_graph
 
 # =====================================================================
@@ -30,47 +30,17 @@ load_dotenv()
 api_key = os.environ["GROQ_API_KEY"]
 
 
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-from psycopg_pool import AsyncConnectionPool
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from app.database.database import DATABASE_URL  # points to your environment string
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Clean the connection string for psycopg (remove SQLAlchemy's asyncpg prefix)
-    langgraph_db_url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-
-    # 2. Define pool arguments specifically for your connection pooler
-    connection_kwargs = {"prepare_threshold": None, "autocommit": True}
-
-    # 3. Initialize the connection pool context manager
-    async with AsyncConnectionPool(
-        conninfo=langgraph_db_url,
-        kwargs=connection_kwargs,
-        min_size=1,
-        max_size=2,
-        open=False,
-    ) as pool:
-        await pool.open()
-
-        # 4. FIX: Instantiated as a standard object rather than a context manager
-        checkpointer = AsyncPostgresSaver(pool)
-
-        # 5. Build the underlying tables if they don't exist
-        print("INFO:     Checking/Creating LangGraph system tables...")
+    """
+    Sets up the AsyncPostgresSaver checkpointer ONCE for the app's lifetime.
+    `setup()` creates the checkpointer's tables if they don't exist yet
+    (separate from your ChatSession/Message tables).
+    """
+    async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
         await checkpointer.setup()
-
-        # 6. Bind to app state so your routes can access it
         app.state.checkpointer = checkpointer
-        print(
-            "INFO:     Database checkpointer started successfully via AsyncConnectionPool."
-        )
-
-        yield  # The FastAPI server runs and handles traffic here
-
-    print("INFO:     Database checkpointer pool shutting down.")
+        yield
 
 
 app = FastAPI(lifespan=lifespan)
@@ -115,7 +85,11 @@ async def database_check(db: AsyncSession = Depends(get_db)):
         neo4j_status = "failed"
         neo4j_error = str(e)
 
-    overall_status = "healthy" if postgres_status == "connected" and neo4j_status == "connected" else "unhealthy"
+    overall_status = (
+        "healthy"
+        if postgres_status == "connected" and neo4j_status == "connected"
+        else "unhealthy"
+    )
 
     return {
         "status": overall_status,
@@ -130,36 +104,49 @@ async def database_check(db: AsyncSession = Depends(get_db)):
 # 🛣️ ROUTE 1: PRIMARY AGENT ENDPOINT
 # =====================================================================
 @app.post("/api/agent")
-async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db)):
+async def user_message(
+    payload: UserMessage,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user),
+):
     """
     The main gateway. Builds the agent graph for this request and runs it.
     `thread_id` = session_id, so the checkpointer keeps each session's
     conversation state isolated and resumable.
     """
 
-    # --- Fire-and-forget Neo4j graph extraction (unchanged from original) ---
-    async def extract_and_save_graph(user_text: str):
+    # --- Fire-and-forget Neo4j graph extraction (scoped to this user) ---
+    async def extract_and_save_graph(user_text: str, owner_user_id: str):
         try:
             extractor_llm_graph = ChatGroq(
                 model="llama-3.3-70b-versatile",
                 temperature=0.0,
                 api_key=SecretStr(api_key),
             )
-            graph_extractor = extractor_llm_graph.with_structured_output(KnowledgeGraphUpdate)
-            graph_update = await graph_extractor.ainvoke(f"Extract core facts as nodes/edges: '{user_text}'")
-            await neo4j_client.execute_graph_update(graph_update.model_dump())
+            graph_extractor = extractor_llm_graph.with_structured_output(
+                KnowledgeGraphUpdate
+            )
+            graph_update = await graph_extractor.ainvoke(
+                f"Extract core facts as nodes/edges: '{user_text}'"
+            )
+            await neo4j_client.execute_graph_update(
+                graph_update.model_dump(), owner_user_id
+            )
         except Exception as e:
             print(f"⚠️ Graph extraction failed: {str(e)}")
 
-    asyncio.create_task(extract_and_save_graph(payload.message))
+    asyncio.create_task(extract_and_save_graph(payload.message, user_id))
 
     checkpointer = app.state.checkpointer
-    compiled_graph = build_graph(db=db, user_message=payload.message, checkpointer=checkpointer)
+    compiled_graph = build_graph(
+        db=db, user_message=payload.message, checkpointer=checkpointer
+    )
 
     config = {"configurable": {"thread_id": payload.sessionId}}
 
     initial_state = {
         "session_id": payload.sessionId,
+        "user_id": user_id,
     }
 
     result = await compiled_graph.ainvoke(initial_state, config=config)
@@ -189,7 +176,11 @@ async def user_message(payload: UserMessage, db: AsyncSession = Depends(get_db))
 # 🛣️ ROUTE 2: RESUME HIBERNATED AGENT
 # =====================================================================
 @app.post("/api/agent/resume")
-async def resume_agent(payload: ResumeAction, db: AsyncSession = Depends(get_db)):
+async def resume_agent(
+    payload: ResumeAction,
+    db: AsyncSession = Depends(get_db),
+    user_id: str = Depends(get_current_user),
+):
     """
     Resumes a graph that was paused by interrupt() inside the `tools` node.
     """

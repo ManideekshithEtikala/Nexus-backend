@@ -47,7 +47,8 @@ You are Nexus, an advanced execution agent.
 """
 
 BEHAVIOUR_MAP = {
-    BehaviourPattern.CASUAL_PRODUCTIVITY: BASE_BEHAVIOUR_TEMPLATE + """
+    BehaviourPattern.CASUAL_PRODUCTIVITY: BASE_BEHAVIOUR_TEMPLATE
+    + """
 ## Behaviour mode: Casual Productivity
 - Prioritize speed, clarity, and practical execution.
 - Give direct answers first.
@@ -56,8 +57,8 @@ BEHAVIOUR_MAP = {
 - Ask at most one clarifying question only when the task is blocked.
 - Keep the response compact and useful for fast iteration.
 """,
-
-    BehaviourPattern.DEEP_RESEARCH: BASE_BEHAVIOUR_TEMPLATE + """
+    BehaviourPattern.DEEP_RESEARCH: BASE_BEHAVIOUR_TEMPLATE
+    + """
 ## Behaviour mode: Deep Research
 - Prioritize completeness, verification, and nuance.
 - Break the problem into sub-questions before answering.
@@ -66,8 +67,8 @@ BEHAVIOUR_MAP = {
 - Structure responses with clear sections, comparisons, and synthesized findings.
 - Prefer depth over brevity when the task benefits from it.
 """,
-
-    BehaviourPattern.STANDARD_CODING: BASE_BEHAVIOUR_TEMPLATE + """
+    BehaviourPattern.STANDARD_CODING: BASE_BEHAVIOUR_TEMPLATE
+    + """
 ## Behaviour mode: Standard Coding
 - Prioritize correctness, maintainability, and working solutions.
 - Produce code that is directly usable and consistent with the user's stack.
@@ -77,8 +78,8 @@ BEHAVIOUR_MAP = {
 - When debugging, identify root cause first, then propose the fix.
 - Preserve existing interfaces and behavior unless change is requested.
 """,
-
-    BehaviourPattern.CRITICAL_REFLECTIVE: BASE_BEHAVIOUR_TEMPLATE + """
+    BehaviourPattern.CRITICAL_REFLECTIVE: BASE_BEHAVIOUR_TEMPLATE
+    + """
 ## Behaviour mode: Critical Reflective
 - Prioritize careful evaluation, weighing pros/cons, and identifying risks.
 - Question assumptions (including the user's) where warranted.
@@ -88,15 +89,19 @@ BEHAVIOUR_MAP = {
 
 
 async def inject_permanent_facts_node(state: AgentGraphState) -> dict:
-    permanent_facts_text = await neo4j_client.fetch_user_graph_facts()
+    permanent_facts_text = await neo4j_client.fetch_user_graph_facts(state["user_id"])
 
-    behaviour_value = state.get("current_behaviour") or BehaviourPattern.CASUAL_PRODUCTIVITY.value
+    behaviour_value = (
+        state.get("current_behaviour") or BehaviourPattern.CASUAL_PRODUCTIVITY.value
+    )
     try:
         behaviour = BehaviourPattern(behaviour_value)
     except ValueError:
         behaviour = BehaviourPattern.CASUAL_PRODUCTIVITY
 
-    template = BEHAVIOUR_MAP.get(behaviour, BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY])
+    template = BEHAVIOUR_MAP.get(
+        behaviour, BEHAVIOUR_MAP[BehaviourPattern.CASUAL_PRODUCTIVITY]
+    )
 
     prompt_text = template.format(
         summary=state.get("current_summary", "") or "",
