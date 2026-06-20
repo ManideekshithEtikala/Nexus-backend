@@ -37,7 +37,23 @@ async def lifespan(app: FastAPI):
     `setup()` creates the checkpointer's tables if they don't exist yet
     (separate from your ChatSession/Message tables).
     """
-    async with AsyncPostgresSaver.from_conn_string(DATABASE_URL) as checkpointer:
+    from psycopg_pool import AsyncConnectionPool
+    from psycopg.rows import dict_row
+
+    # Clean the connection string for psycopg
+    checkpointer_url = DATABASE_URL
+    if checkpointer_url.startswith("postgresql+asyncpg://"):
+        checkpointer_url = checkpointer_url.replace("postgresql+asyncpg://", "postgresql://")
+    
+    # Use AsyncConnectionPool to automatically handle connection management, reconnects, and scaling.
+    # We pass prepare_threshold=None to disable prepared statements (critical for Supabase poolers).
+    async with AsyncConnectionPool(
+        conninfo=checkpointer_url,
+        min_size=0,
+        max_size=4,
+        kwargs={"autocommit": True, "prepare_threshold": None, "row_factory": dict_row}
+    ) as pool:
+        checkpointer = AsyncPostgresSaver(pool)
         await checkpointer.setup()
         app.state.checkpointer = checkpointer
         yield
