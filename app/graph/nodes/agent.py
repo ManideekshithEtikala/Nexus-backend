@@ -17,8 +17,7 @@ enforce MAX_ITERATIONS (replacing your `while iteration < MAX_ITERATIONS`).
 import os
 from pydantic import SecretStr
 from langchain_groq import ChatGroq
-from langchain_core.messages import AIMessage
-
+from langchain_core.messages import AIMessage,SystemMessage
 from app.tools.state_immutability import TOOL_REGISTRY
 from app.graph.state import AgentGraphState
 
@@ -29,6 +28,17 @@ llm = ChatGroq(
     api_key=SecretStr(api_key),
 )
 
+TOOL_ENFORCEMENT_PROMPT = SystemMessage(
+    content=(
+        "CRITICAL SYSTEM RULE:\n"
+        "When you use the 'execution_code' tool, you must pass raw text directly "
+        "into the 'code' argument string. NEVER wrap the 'code' argument value "
+        "in markdown formatting, backticks, or code blocks (like ```python ... ```).\n"
+        "If you want to output code blocks for the user to read, use a 'markdown_text' block type "
+        "in your UI pipeline, but do NOT mix it with tool execution parameters."
+    )
+)
+
 
 async def agent_node(state: AgentGraphState) -> dict:
     active_tool_names = state.get("active_tool_names", [])
@@ -37,18 +47,17 @@ async def agent_node(state: AgentGraphState) -> dict:
     ]
 
     current_llm = llm.bind_tools(active_tools) if active_tools else llm
+    
+    messages_to_send = list(state["messages"])
+    if active_tools:
+        messages_to_send.insert(0,TOOL_ENFORCEMENT_PROMPT)
 
     try:
-        ai_message = await current_llm.ainvoke(state["messages"])
+        ai_message = await current_llm.ainvoke(messages_to_send)
     except Exception as e:
-        # Groq's tool-calling sometimes fails with 400 tool_use_failed when
-        # the model produces malformed function-call syntax (common with
-        # llama-4-scout on code-heavy or ambiguous-tool-choice prompts).
-        # RETRY ONCE without tools bound, so the model can at least answer
-        # in plain text instead of crashing the whole graph.
         print(f"⚠️ [AGENT] LLM call with tools failed: {e}. Retrying without tools.")
         try:
-            ai_message = await llm.ainvoke(state["messages"])
+            ai_message = await llm.ainvoke(messages_to_send)
         except Exception as e2:
             print(f"⚠️ [AGENT] Retry without tools also failed: {e2}")
             ai_message = AIMessage(

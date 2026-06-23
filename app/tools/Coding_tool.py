@@ -7,14 +7,25 @@ from pydantic import BaseModel
 from langchain_core.tools import tool
 
 
+from pydantic import BaseModel, Field
+
 class Coding_tool_schema(BaseModel):
-    language: str
-    code: str
-    timeout: int
+    language: str = Field(
+        description="The programming language to execute. Must be 'python' or 'javascript'."
+    )
+    code: str = Field(
+        description=(
+            "The raw script content to execute. CRITICAL: Provide only the plain text code. "
+            "Do NOT wrap this string inside markdown code blocks (like ```python ... ```)."
+        )
+    )
+    timeout: int = Field(
+        description="Maximum wall-clock time in seconds before killing the process."
+    )
 
 
 @tool("execution_code", args_schema=Coding_tool_schema)
-def execute_agent_code_wasm(language: str, code: str, timeout: str) -> Dict[str, Any]:
+def execute_agent_code_wasm(language: str, code: str, timeout: int) -> Dict[str, Any]:
     """
     Executes code inside a sandboxed WebAssembly (Wasm) runtime wrapper.
     For production scale, this uses a pre-compiled lightweight WASI language binary.
@@ -91,7 +102,7 @@ x = 144
 print(f"The square root of {x} is {math.sqrt(x)}")
 """
     print("--- Running Test 1: Isolated Success Case ---")
-    res1 = execute_agent_code_wasm(language="python", code=math_test)
+    res1 = execute_agent_code_wasm(language="python", code=math_test,timeout=10)
     print(f"Success: {res1['success']}")
     print(f"Stdout:\n{res1['stdout']}")
 
@@ -103,6 +114,6 @@ def calculate():
 calculate()
 """
     print("\n--- Running Test 2: Error Tracing ---")
-    res2 = execute_agent_code_wasm(language="python", code=broken_test)
+    res2 = execute_agent_code_wasm(language="python", code=broken_test,timeout=10)
     print(f"Success: {res2['success']}")
     print(f"Stderr Captured for Agent Self-Correction:\n{res2['stderr']}")
