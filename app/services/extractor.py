@@ -16,7 +16,7 @@ api_key = SecretStr(groq_api_key)
 
 # Plain LLM — NO .with_structured_output(), NO tools bound
 extractor_llm = ChatGroq(
-    model="llama-3.3-70b-versatile", temperature=0.0, api_key=api_key
+    model="meta-llama/llama-4-scout-17b-16e-instruct", temperature=0.0, api_key=api_key
 )
 
 _SYSTEM_PROMPT = """

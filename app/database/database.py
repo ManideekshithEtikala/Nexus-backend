@@ -40,16 +40,19 @@ async_session_local = async_sessionmaker(
 class Base(DeclarativeBase):
     pass
 
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with async_session_local() as session:
         try:
             yield session
             await session.commit()
-        except Exception:
+        except Exception as e:
+            print(f"🛑 [DATABASE OOPS] Rolling back transaction due to error: {e}")
             await session.rollback()
             raise
-        finally:
-            await session.close()
+        # DO NOT call session.close() here.
+        # The 'async with' block closes it natively upon exit.
+
 
 async def init_db():
     async with engine.begin() as conn:

@@ -13,14 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from langchain_groq import ChatGroq
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
-
+from langchain_core.messages import HumanMessage
 # 🏗️ ARCHITECTURE SERVICES
 from app.database import get_db
 from app.database.database import DATABASE_URL
 from app.database.database_neo4j import neo4j_client
 from app.core.schema import UserMessage, ResumeAction, KnowledgeGraphUpdate
 from app.core.auth import get_current_user
-from app.graph.agent_graph import build_graph
+from app.graph.supervisor_agent.supervisor_graph import build_supervisor_graph as build_graph
 
 # =====================================================================
 # ⚙️ SYSTEM INITIALIZATION
@@ -135,15 +135,18 @@ async def user_message(
     async def extract_and_save_graph(user_text: str, owner_user_id: str):
         try:
             extractor_llm_graph = ChatGroq(
-                model="llama-3.3-70b-versatile",
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
                 temperature=0.0,
                 api_key=SecretStr(api_key),
             )
             graph_extractor = extractor_llm_graph.with_structured_output(
-                KnowledgeGraphUpdate
+                KnowledgeGraphUpdate,method="json_mode"
             )
             graph_update = await graph_extractor.ainvoke(
-                f"Extract core facts as nodes/edges: '{user_text}'"
+                f'''Extract core facts as nodes/edges: '{user_text}' and return in JSON format. and the output shoudl match the format of {KnowledgeGraphUpdate.model_json_schema()}
+                CRITICAL instruction for Graph Extraction:
+                Every item in the "nodes" array must use the keys "entity_name" and "entity_type". Do NOT use "id" or "text".
+                Every item in the "edges" array must use the keys "source_node", "target_node", and "relation". Do NOT use "from" or "to".'''
             )
             await neo4j_client.execute_graph_update(
                 graph_update.model_dump(), owner_user_id
@@ -154,18 +157,26 @@ async def user_message(
     asyncio.create_task(extract_and_save_graph(payload.message, user_id))
 
     checkpointer = app.state.checkpointer
-    compiled_graph = build_graph(
-        db=db, user_message=payload.message, checkpointer=checkpointer
-    )
+    compiled_graph = build_graph( checkpointer=checkpointer)
 
-    config = {"configurable": {"thread_id": payload.sessionId}}
+    config = {"configurable": {"thread_id": payload.sessionId, "db": db}}
 
     initial_state = {
+        "messages":[HumanMessage(content=payload.message)],
         "session_id": payload.sessionId,
         "user_id": user_id,
+        "user_message": payload.message,
+        "routing_round": 0,
+        "is_final": False,
+        "worker_results": {"__reset__": True},  # Clear any previous results for this session
+        "delegated_tasks": {},
     }
-
     result = await compiled_graph.ainvoke(initial_state, config=config)
+    print(f"🟢 [MAIN] full graph result keys -> {list(result.keys())!r}")
+    print(
+        f"🟢 [MAIN] final_response present? {'final_response' in result!r} "
+        f"-> value={result.get('final_response')!r}"
+    )
 
     # Check if the graph paused on an interrupt (e.g. send_email approval)
     if "__interrupt__" in result:
@@ -184,7 +195,7 @@ async def user_message(
     return {
         "status": "success",
         "session_id": payload.sessionId,
-        "data": result["ui_pipeline"],
+        "data": result.get("final_response", "Processing complete."),
     }
 
 
@@ -201,15 +212,16 @@ async def resume_agent(
     Resumes a graph that was paused by interrupt() inside the `tools` node.
     """
     checkpointer = app.state.checkpointer
-    compiled_graph = build_graph(db=db, user_message="", checkpointer=checkpointer)
+    compiled_graph = build_graph(checkpointer=checkpointer)
 
-    config = {"configurable": {"thread_id": payload.sessionId}}
+    config = {"configurable": {"thread_id": payload.sessionId, "db": db}}
 
     resume_value = {
         "is_approved": payload.is_approved,
         "tool_name": payload.tool_name,
         "tool_args": payload.tool_args,
         "tool_call_id": payload.tool_call_id,
+        
     }
 
     result = await compiled_graph.ainvoke(Command(resume=resume_value), config=config)
@@ -230,5 +242,5 @@ async def resume_agent(
     return {
         "status": "success",
         "session_id": payload.sessionId,
-        "data": result["ui_pipeline"],
+        "data": result.get("final_response", "Processing complete."),
     }
