@@ -42,21 +42,34 @@ async def semantic_tool_router(user_text: str, current_state: str) -> List[Any]:
         # 3. Use the fast model in JSON mode to act as the router
         router_llm = ChatGroq(model="llama-3.3-70b-versatile", temperature=0.0, api_key=SecretStr(api_key))
         router = router_llm.with_structured_output(ToolSelection, method="json_mode")
-        
+
         selection = await router.ainvoke(routing_prompt)
         selected_tool_names = selection.selected_tools
+        # 1. Check if selection itself is None or didn't parse into the Pydantic model
+        if not selection:
+            print("⚠️ [ROUTER] LLM returned an empty response. Falling back.")
+            selected_tool_names = ["change_behaviour_profile"]
+        # 2. Safely extract attributes even if it parsed as a raw dictionary/string due to markdown bugs
+        elif hasattr(selection, "selected_tools") and selection.selected_tools:
+            selected_tool_names = selection.selected_tools
+        elif isinstance(selection, dict) and "selected_tools" in selection:
+            selected_tool_names = selection["selected_tools"]
+        else:
+            print(f"⚠️ [ROUTER] Unexpected output format: {selection}. Falling back.")
+            selected_tool_names = ["change_behaviour_profile"]
+
         print(f"🧠 [ROUTER] Selected tools: {selected_tool_names}")
-        
+
         # 4. Map the string names back to actual LangChain Tool objects
         active_tools = []
         for name in selected_tool_names:
             if name in TOOL_REGISTRY:
                 active_tools.append(TOOL_REGISTRY[name])
-                
+
         # Failsafe: Ensure transition tool is always present
         if TOOL_REGISTRY["change_behaviour_profile"] not in active_tools:
             active_tools.append(TOOL_REGISTRY["change_behaviour_profile"])
-            
+
         return active_tools
 
     except Exception as e:

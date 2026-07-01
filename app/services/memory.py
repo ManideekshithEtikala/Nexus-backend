@@ -14,7 +14,11 @@ from app.models.model import ChatSession, Message
 from app.core.schema import AgentState, MemoryTaggingSchema
 
 api_key = os.environ.get("GROQ_API_KEY")
-llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", temperature=0.1, api_key=SecretStr(api_key))
+llm = ChatGroq(
+    model="meta-llama/llama-4-scout-17b-16e-instruct",
+    temperature=0.1,
+    api_key=SecretStr(api_key),
+)
 
 # =====================================================================
 # 🧠 MEMORY CLASSIFIER (Restored!)
@@ -34,7 +38,7 @@ async def get_or_create_session(db: AsyncSession, session_id: str, first_message
         db.add(chat_session)
         await db.commit()
     return chat_session
-#updaing the state of the Agent by fetching necessary data form the db postgres
+# updaing the state of the Agent by fetching necessary data form the db postgres
 async def populate_state_context(db: AsyncSession, state: AgentState) -> list[Message]:
     """Rebuilds the AI's LangChain message array from PostgreSQL history."""
     msg_result = await db.execute(select(Message).where(Message.session_id == uuid.UUID(state.session_id)).order_by(Message.created_at.asc()))

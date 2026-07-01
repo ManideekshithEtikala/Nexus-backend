@@ -4,10 +4,11 @@ from typing import Dict, Any, Tuple
 from pydantic import ValidationError
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
-
+from app.tools.Coding_tool import execute_agent_code_wasm
 from app.tools.Web_search import web_search_tool
 from app.tools.Research_docs import research_docs_tool
 from app.tools.change_behaviour_tool import change_behaviour_profile
+from app.tools.youtube_tool import search_youtube_videos
 from pydantic import BaseModel, Field
 from langchain_core.tools import tool
 import json
@@ -48,7 +49,10 @@ ALL_TOOLS = [
     web_search_tool,
     research_docs_tool,
     change_behaviour_profile,
-    send_email_tool     # 👈 CRITICAL: Added here!
+    send_email_tool,
+    execute_agent_code_wasm,
+    search_youtube_videos,
+    # 👈 CRITICAL: Added here!
 ]
 
 # 3. CREATE THE REGISTRY
